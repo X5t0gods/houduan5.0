@@ -48,6 +48,9 @@ known-first-party = ["app"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "integration: 需要真实数据库的集成测试（无数据库时自动 skip）",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]

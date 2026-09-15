@@ -71,6 +71,11 @@ except ImportError as e:  # pragma: no cover
     print(f"[check_models] 无法导入 app.models：{e}", file=sys.stderr)
 
 
+# 排除列表：工具链自己维护的元数据表，不属于业务模型范畴
+# - alembic_version：Alembic 版本跟踪表（`alembic stamp head` 后自动创建）
+EXCLUDED_TABLES: set[str] = {"alembic_version"}
+
+
 # ---------- 类型白名单 ----------
 # MySQL information_schema.columns.DATA_TYPE（小写） → 允许的 SQLAlchemy 类型
 # 为什么 TINYINT → SmallInteger：接口约定 tinyint 输出 number（0/1）不是 bool，
@@ -181,14 +186,14 @@ def _preflight_check(eng: Engine) -> str | None:
 
 
 def fetch_db_tables(eng: Engine, schema: str) -> set[str]:
-    """读取数据库中的所有表名。"""
+    """读取数据库中的所有表名（自动排除工具链元数据表）。"""
     with eng.connect() as conn:
         rows = conn.execute(
             text("SELECT table_name FROM information_schema.tables "
                  "WHERE table_schema = :s AND table_type = 'BASE TABLE'"),
             {"s": schema},
         ).fetchall()
-    return {r[0] for r in rows}
+    return {r[0] for r in rows if r[0] not in EXCLUDED_TABLES}
 
 
 def fetch_db_columns(eng: Engine, schema: str, table: str) -> dict[str, dict[str, Any]]:

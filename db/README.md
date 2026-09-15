@@ -7,10 +7,11 @@
 | --- | --- |
 | 数据库 | MySQL 8.0（InnoDB / utf8mb4） |
 | 库名 | `community_supermarket` |
-| 表数量 | **61 张**（8 个数据域） |
+| 表数量 | **62 张**（8 个数据域，含阶段 1 新增的 `sys_no_seq`） |
 | 外键 | 86 条（全部 RESTRICT，无级联删除） |
+| 唯一键 | 42 个（含阶段 1 新增的 `mem_balance_flow.uk_request_id`） |
 | 字符集 | utf8mb4 / utf8mb4_general_ci |
-| 生成日期 | 2026-09-15 |
+| 生成日期 | 2026-09-15（阶段 1 同步更新） |
 
 ---
 
@@ -18,7 +19,7 @@
 
 | 文件 | 作用 | 大小 |
 | --- | --- | --- |
-| `01_schema.sql` | **建库建表**：创建数据库 + 61 张表 + 86 条外键 | 约 92 KB |
+| `01_schema.sql` | **建库建表**：创建数据库 + 62 张表 + 86 条外键 + 42 个唯一键 | 约 96 KB |
 | `02_init_data.sql` | **初始化数据**：权限树、用户、商品、会员、促销等 | 约 35 KB |
 | `README.md` | 本文件：使用说明与接口映射 | — |
 
@@ -59,7 +60,7 @@ source /path/to/02_init_data.sql;
 | 域 | 前缀 | 表数 | 职责 |
 | --- | --- | --- | --- |
 | 基础数据域 | `base_` | 4 | 门店、收银台、计量单位、货架 |
-| 权限与用户域 | `sys_` | **11** | 用户、角色、权限、参数、字典、日志、**验证码**、**备份记录** |
+| 权限与用户域 | `sys_` | **12** | 用户、角色、权限、参数、字典、日志、**验证码**、**备份记录**、**单号序列**（阶段 1 新增） |
 | 商品域 | `prd_` | 7 | 分类、SPU、商品、条码、价格历史、标签 |
 | 供应商与采购域 | `pur_` | 9 | 供应商、采购单、收货、退货、付款 |
 | 库存域 | `inv_` | 9 | 库存快照、**库存流水**、批次、盘点、报损、调拨 |
@@ -73,7 +74,7 @@ source /path/to/02_init_data.sql;
 base_store          base_pos            base_unit           base_shelf
 sys_user            sys_role            sys_permission      sys_user_role
 sys_role_permission sys_config          sys_dict            sys_operation_log
-sys_login_log       sys_captcha         sys_backup
+sys_login_log       sys_captcha         sys_backup          sys_no_seq
 prd_category        prd_spu             prd_product         prd_barcode
 prd_price_history   prd_tag             prd_product_tag
 pur_supplier        pur_supplier_product pur_order          pur_order_item
@@ -287,6 +288,18 @@ bi_analysis_task    bi_association_rule bi_recommend_cache  bi_daily_stat
 同时修正了 `sys_permission.perm_type` 的注释（原注释写"1 菜单 2 按钮"，与实际使用的
 "1 目录 2 菜单 3 按钮"不一致，易误导）。
 
+### 5.1 阶段 1 补上的 2 处基线缺口
+
+阶段 1（数据层）开工时对照 docs/07 第 0.1 节逐条核对，又发现并补齐了 2 处：
+
+| 缺口 | 影响的接口 | 补充方案 |
+| --- | --- | --- |
+| **单号无生成源** | 16 类单据/编码（XS/CG/SH/CT/FK/PD/BS/DB/JB/CZ/GD/P/S/M/BATCH）都要"日期 + 并发安全流水号"，而 8.2 节明令**禁止 `SELECT MAX(...)+1`** | 新增表 **`sys_no_seq`**（复合主键 `seq_key + seq_date`，无 AUTO_INCREMENT 列），配合 MySQL `LAST_INSERT_ID(expr)` 惯用法原子自增，实现位于 `app/core/sequence.py` |
+| **充值幂等键无落库位置** | `POST /members/{id}/recharge` 标注幂等，`request_id` 由前端自动注入，但 `mem_balance_flow` 无相应列 | `mem_balance_flow` 补 **`request_id VARCHAR(64)` 可空列** + **`uk_request_id` 唯一索引**（MySQL UNIQUE 允许多 NULL，"有值必唯一、无值不冲突"） |
+
+补齐后：表 61 → **62**，唯一键 41 → **42**，外键仍为 **86** 条（sys_no_seq 不引入外键）。
+实测：`scripts/check_models.py` 验证模型与库零差异，`alembic stamp head` 已把数据库标记到基线版本 `0001_baseline`。
+
 ---
 
 ## 6 字段命名差异说明
@@ -351,13 +364,15 @@ bi_analysis_task    bi_association_rule bi_recommend_cache  bi_daily_stat
 
 | 验证项 | 结果 |
 | --- | --- |
-| 建表执行 | ✅ 61 张表创建成功 |
+| 建表执行 | ✅ 62 张表创建成功（阶段 1 含 `sys_no_seq`） |
 | 外键创建 | ✅ 86 条全部成功 |
+| 唯一键 | ✅ 42 个全部成功（含 `mem_balance_flow.uk_request_id`） |
 | 初始化数据导入 | ✅ 无错误 |
 | **从零重建**（DROP DATABASE 后重跑） | ✅ 成功，脚本可重复执行 |
 | 权限码与前端比对 | ✅ **29 个功能权限码零差异** |
 | 库存勾稽校验 | ✅ **0 条不一致**（`inv_stock.quantity` = `Σ流水`） |
 | 各角色权限分配 | ✅ 32 / 29 / 7 / 11 / 10，符合职责设计 |
+| **模型与库结构一致性**（阶段 1） | ✅ `scripts/check_models.py` 零差异：表 62/62、字段 693/693、外键 86/86、唯一键 42/42 |
 
 ### 库存勾稽校验 SQL（可随时跑）
 

@@ -11,7 +11,7 @@ from decimal import Decimal
 
 from app.core.context import set_request_id
 from app.core.response import fail, success
-from app.schemas.base import BaseSchema, DateTimeStr, Money, Qty
+from app.schemas.base import BaseSchema, DateTimeStr, Money, Qty, Rate
 
 
 class TestResponseBuilder:
@@ -93,6 +93,47 @@ class TestSerialization:
         assert dumped["created_at"] == "2026-09-15 18:30:00"
         # 确认不是 ISO 格式
         assert "T" not in dumped["created_at"]
+
+    def test_rate_serializes_to_6_decimals(self) -> None:
+        """Rate 类型（阶段 1 新增）：Decimal("1.234567") 序列化后不能被截断为 2 位。
+
+        为什么需要 Rate：提升度 lift、置信度 confidence 等 BI 指标精度到 4-5 位，
+        若误用 Money（2 位）会把 1.2345 截断成 1.23，直接影响论文实验数据。
+        """
+
+        class RateModel(BaseSchema):
+            lift: Rate
+
+        model = RateModel(lift=Decimal("1.234567"))
+        dumped = model.model_dump(mode="json")
+
+        # 必须是 float（number），不是 str
+        assert isinstance(dumped["lift"], float)
+        # 保留到 6 位（不被截断为 2 位）
+        assert dumped["lift"] == 1.234567
+
+    def test_rate_vs_money_precision_difference(self) -> None:
+        """对照测试：同样的 Decimal 用 Money 会被截断，用 Rate 保留精度。"""
+
+        class MoneyModel(BaseSchema):
+            amount: Money
+
+        class RateModel(BaseSchema):
+            ratio: Rate
+
+        value = Decimal("1.234567")
+        assert MoneyModel(amount=value).model_dump(mode="json")["amount"] == 1.23
+        assert RateModel(ratio=value).model_dump(mode="json")["ratio"] == 1.234567
+
+    def test_rate_handles_small_values(self) -> None:
+        """Rate 对小于 1 的值（如 support=0.00123）也保留精度。"""
+
+        class RateModel(BaseSchema):
+            support: Rate
+
+        model = RateModel(support=Decimal("0.00123"))
+        dumped = model.model_dump(mode="json")
+        assert dumped["support"] == 0.00123
 
 
 class TestPageResult:
