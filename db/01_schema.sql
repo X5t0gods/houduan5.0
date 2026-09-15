@@ -7,8 +7,9 @@
 --  存储引擎  :  InnoDB
 --  脚本版本  :  V1.0
 --  编制日期  :  2026-09-15
---  表数量    :  61 张，按 8 个数据域组织
---  外键数量  :  86 条
+--  表数量    :  62 张，按 8 个数据域组织
+--  外键数量  :  86 条（本次变更不新增外键）
+--  唯一键数量:  42 个（含本次新增的 mem_balance_flow.uk_request_id）
 -- ----------------------------------------------------------------------------
 --  设计依据
 --    1.《详细功能需求文档》第 3、4 章
@@ -297,6 +298,23 @@ CREATE TABLE `sys_backup` (
   UNIQUE KEY `uk_file_name` (`file_name`),
   KEY `idx_time` (`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='数据库备份记录';
+
+-- ----------------------------------------------------------------------------
+--  单号流水序列
+--  用途：为 16 类单据/编码提供并发安全的流水号（见需求文档 8.2 节）
+--  为什么单独建表：全库原无处存放流水计数，而 8.2 节明确禁止 SELECT MAX(...)+1
+--  为什么用复合主键而不加 AUTO_INCREMENT：
+--      MySQL 的 LAST_INSERT_ID(expr) 惯用法在「首次插入」路径上会返回自增 ID，
+--      导致新键第一次取号得到错误的巨大值；去掉自增列才能让两条路径返回同一语义。
+-- ----------------------------------------------------------------------------
+DROP TABLE IF EXISTS `sys_no_seq`;
+CREATE TABLE `sys_no_seq` (
+  `seq_key`     VARCHAR(32)  NOT NULL                COMMENT '业务键 XS/CG/SH/CT/FK/PD/BS/DB/JB/CZ/GD/P/S/M/BATCH',
+  `seq_date`    DATE         NOT NULL                COMMENT '日期分区；不按日重置的键（P/S）固定 1970-01-01',
+  `current_val` INT UNSIGNED NOT NULL DEFAULT 0      COMMENT '当前已分配的最大流水号',
+  `updated_at`  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`seq_key`, `seq_date`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='单号流水序列（并发安全，禁止 SELECT MAX+1）';
 
 
 -- ============================================================================
@@ -849,10 +867,12 @@ CREATE TABLE `mem_balance_flow` (
   `after_gift`     DECIMAL(12,2)   NOT NULL DEFAULT 0.00   COMMENT '变动后赠送余额',
   `pay_method`     VARCHAR(16)     DEFAULT NULL            COMMENT '支付方式（充值时）',
   `source_no`      VARCHAR(32)     DEFAULT NULL            COMMENT '来源单据号',
+  `request_id`     VARCHAR(64)     DEFAULT NULL            COMMENT '幂等键（前端生成，防重复充值）',
   `operator`       BIGINT UNSIGNED DEFAULT NULL            COMMENT '操作人ID',
   `remark`         VARCHAR(255)    DEFAULT NULL            COMMENT '备注',
   `created_at`     DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '发生时间',
   PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_request_id` (`request_id`),
   KEY `idx_member_time` (`member_id`, `created_at`),
   KEY `idx_source` (`source_no`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='会员储值流水（只增不改）';
@@ -1322,8 +1342,9 @@ SET FOREIGN_KEY_CHECKS = 1;
 
 -- ============================================================================
 --  脚本结束（仅表结构）
---  表数量：61 张
---    base 4 + sys 11 + prd 7 + pur 9 + inv 9 + mem/pro 10 + sal 7 + bi 4 = 61
---  外键数量：86 条
+--  表数量：62 张
+--    base 4 + sys 12 + prd 7 + pur 9 + inv 9 + mem/pro 10 + sal 7 + bi 4 = 62
+--  外键数量：86 条（sys_no_seq 不引入外键）
+--  唯一键数量：42 个（含 mem_balance_flow.uk_request_id）
 --  初始化数据见 02_init_data.sql（权限树、用户、商品、会员、促销等）
 -- ============================================================================
