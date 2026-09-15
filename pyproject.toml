@@ -36,6 +36,11 @@ target-version = "py311"
 select = ["E", "F", "I", "UP", "B", "SIM"]
 ignore = ["B008"]  # FastAPI Depends() 在默认参数中使用是惯用写法
 
+[tool.ruff.lint.per-file-ignores]
+# SQLAlchemy 声明式模型：一行写完一个字段更可读（包含 mapped_column + 类型 + 约束 + comment），
+# 强制拆行反而降低信息密度。社区惯例（包括 FastAPI 官方全栈模板）均对 models/ 目录宽容 E501。
+"app/models/*.py" = ["E501"]
+
 [tool.ruff.lint.isort]
 known-first-party = ["app"]
 
