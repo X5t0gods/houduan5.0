@@ -1,23 +1,26 @@
 """API v1 路由汇总 - 挂载全部 10 个模块的路由。
 
-本阶段只挂载 health 接口。
-后续阶段会逐步添加：auth, product, inventory, purchase, sale,
-member, promotion, report, bi, system 共 128 个接口。
+阶段 0：health
+阶段 2：+ auth（6 接口） + _dev/authorized（DEBUG 权限调试路由）
+后续阶段：product / inventory / purchase / sale / member / promotion / report / bi / system
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from app.api.v1.auth import router as auth_router
 from app.api.v1.health import router as health_router
 from app.core.config import settings
+from app.core.response import success
+from app.deps import require_perm
 
 # 创建 v1 主路由
 api_router = APIRouter()
 
-# ---------- 本阶段挂载 ----------
+# ---------- 已挂载 ----------
 api_router.include_router(health_router)
+api_router.include_router(auth_router)
 
 # ---------- 后续阶段挂载（占位注释） ----------
-# api_router.include_router(auth_router, prefix="/auth", tags=["认证与权限"])
 # api_router.include_router(product_router, prefix="/products", tags=["商品管理"])
 # api_router.include_router(inventory_router, prefix="/inventory", tags=["库存管理"])
 # api_router.include_router(purchase_router, prefix="/purchases", tags=["采购与供应商"])
@@ -53,3 +56,28 @@ if settings.DEBUG:
             BusinessError: 始终抛出 REQUIRED_MISSING 错误。
         """
         raise BusinessError(ErrorCode.REQUIRED_MISSING)
+
+    # ⭐ 阶段 2 新增：受权限保护的调试路由（用于验证 require_perm 真的生效）
+    # spec 4.11：用最小代价验证权限依赖，比编造业务接口更干净
+    # 阶段 3 起会删除此路由
+    @api_router.get(
+        "/_dev/authorized",
+        summary="[DEBUG] 测试权限依赖（需 sys:user）",
+        description=(
+            "仅供调试：验证 `require_perm('sys:user')` 依赖真的生效。\n\n"
+            "- 未登录 → HTTP 401\n"
+            "- `cashier01` 登录（无 sys:user 权限）→ HTTP 403 + code=1040\n"
+            "- `admin` 登录 → HTTP 200 + `{ok: true}`\n\n"
+            "DEBUG=false 时此路由必须不存在（返回 404）。阶段 3 起会删除。"
+        ),
+        include_in_schema=True,
+        tags=["开发调试"],
+        dependencies=[Depends(require_perm("sys:user"))],
+    )
+    def dev_authorized() -> dict:
+        """受 sys:user 权限保护的调试接口。
+
+        Returns:
+            统一响应体，data = {"ok": True}。
+        """
+        return success({"ok": True})

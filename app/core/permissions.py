@@ -1,11 +1,16 @@
 """权限码常量定义 - 与 docs/06 第 1.8 节、数据库 sys_permission.perm_code 一字不差。
 
-⛔ 29 个权限码字符串必须与前端完全一致，错一个字母 = 一整个菜单消失。
-本阶段只定义常量，不写 require_perm 依赖（它依赖 JWT，属阶段 2）。
+⛔ 29 个功能权限码字符串必须与前端完全一致，错一个字母 = 一整个菜单消失。
 
-阶段 2 扩展点：
-- 实现 require_perm(perm_code) 依赖，逐接口校验权限
-- 实现 data_scope 注入（ALL / STORE / DEPT / SELF）
+阶段 2 扩展：
+- 新增 3 个**目录码**常量（menu:daily / menu:stock / menu:analysis）
+  仅用于权限树层级展示，不进入 /auth/me 的 permissions（perm_type=1 过滤掉）
+- 新增 perm_type 常量（PERM_TYPE_DIRECTORY=1 / PERM_TYPE_FUNCTION=2）
+  ⚠️ 数据库中**不存在 perm_type=3**（按钮），docs/06 与建表脚本注释里写的
+  “3 按钮”实际未被使用，属文档与实现不一致处
+
+阶段 2 已接入 require_perm 依赖（见 app/deps.py）；data_scope 过滤已提供
+骨架函数 resolve_store_filter，阶段 3 起由各 repository 调用。
 """
 
 
@@ -66,7 +71,26 @@ class Perm:
     SYS_CONFIG = "sys:config"  # 参数与备份
 
 
-# 全部权限码列表（便于阶段 2 做权限校验与测试）
+class Menu:
+    """目录权限码常量（perm_type=1，仅用于权限树层级展示）。
+
+    ⚠️ **不进入** `/auth/me` 的 permissions 数组，也不作为 `require_perm` 的参数。
+    阶段 10 的“角色与权限”页面渲染权限树时需要（作为一级分组节点）。
+    """
+
+    DAILY = "menu:daily"        # 日常经营（一级目录）
+    STOCK = "menu:stock"        # 进销存（一级目录）
+    ANALYSIS = "menu:analysis"  # 分析与设置（一级目录）
+
+
+# ---------- perm_type 常量 ----------
+# ⚠️ 数据库中不存在 PERM_TYPE_BUTTON=3（按钮），文档描述与实现不一致（spec 1.2 冲突 ③）。
+# 本阶段只定义实际存在的两种，避免后续误用不存在的枚举值。
+PERM_TYPE_DIRECTORY: int = 1   # 目录（权限树层级展示）
+PERM_TYPE_FUNCTION: int = 2    # 菜单/页面级功能权限
+
+
+# 全部**功能**权限码列表（便于阶段 2 做权限校验与测试，不包含目录码）
 ALL_PERMISSIONS: list[str] = [
     Perm.DASHBOARD_VIEW,
     Perm.POS_USE,
@@ -97,4 +121,11 @@ ALL_PERMISSIONS: list[str] = [
     Perm.SYS_USER,
     Perm.SYS_ROLE,
     Perm.SYS_CONFIG,
+]
+
+# 全部目录码列表（阶段 10 权限树渲染使用）
+ALL_MENUS: list[str] = [
+    Menu.DAILY,
+    Menu.STOCK,
+    Menu.ANALYSIS,
 ]

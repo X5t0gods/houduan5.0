@@ -144,10 +144,17 @@ async def http_exception_handler(
 
     Returns:
         对应 HTTP 状态码的响应，body 含 code/message/request_id。
+
+    ⚠️ HTTP 状态码 → 业务错误码的映射（阶段 2 spec 4.8 要求）：
+    - **403 → 1040**（NO_PERMISSION）：前端 request.ts 已内置中文提示，
+      但后端 body code 仍需与需求文档 1.4 节一致（1040）
+    - 401 / 404 / 405 保持与 HTTP 状态码一致（前端主要看 HTTP 状态，不看 body code）
     """
-    # HTTP 异常的 code 直接用状态码（非业务码）
     status_code = exc.status_code
     message = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+
+    # 403 → 业务错误码 1040（spec 4.8 明确要求）
+    body_code = ErrorCode.NO_PERMISSION if status_code == 403 else status_code
 
     # 为常见状态码提供中文默认文案
     default_messages = {
@@ -162,7 +169,7 @@ async def http_exception_handler(
     logger.info(f"HTTP 异常: status={status_code}, path={request.url.path}")
     return JSONResponse(
         status_code=status_code,
-        content=_build_response_body(status_code, message),
+        content=_build_response_body(int(body_code), message),
     )
 
 
