@@ -16,6 +16,10 @@ dependencies = [
     "pymysql>=1.1.0",
     "bcrypt>=4.0.0",
     "python-multipart>=0.0.9",
+    # 阶段 2 认证与权限：JWT 签发/解析 + 图形验证码
+    # ⚠️ 不用 python-jose（依赖重、维护少）也不用 passlib（与 bcrypt>=4.0 不相容）
+    "PyJWT>=2.9.0",
+    "Pillow>=10.4.0",
     # Windows 上 ZoneInfo("Asia/Shanghai") 必须依赖 tzdata 提供的时区数据库；
     # Linux/Mac 有系统 tz 库，装了也无害，统一依赖避免平台差异
     "tzdata>=2024.1",

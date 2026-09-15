@@ -19,6 +19,7 @@ from app.core.config import settings
 from app.core.database import engine
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import get_logger, setup_logging
+from app.core.security import validate_jwt_config
 from app.middleware.request_id import RequestIdMiddleware
 
 logger = get_logger(__name__)
@@ -53,6 +54,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     # ---------- 启动 ----------
     setup_logging()
+
+    # 安全自检：生产环境不允许带占位密钥启动（阶段 2）
+    validate_jwt_config()
 
     # 记录启动时间（使用配置的时区）
     start_time = datetime.now(ZoneInfo(settings.TZ))
