@@ -69,8 +69,9 @@ def cleanup_test_trades() -> Generator[None, None, None]:
         ))
         # 恢复会员
         s.execute(text(
-            "UPDATE mem_member SET balance=500.00, gift_balance=0.00, level_id=3, "
-            "points=100, total_consume=0, consume_count=0, last_consume_at=NULL WHERE id=1"
+            "UPDATE mem_member SET balance=386.50, gift_balance=30.00, level_id=3, "
+            "points=1286, total_consume=8642.30, consume_count=96, "
+            "last_consume_at='2026-09-13 18:20:00' WHERE id=1"
         ))
         # 恢复促销统计
         s.execute(text(
@@ -265,8 +266,8 @@ class TestSettleMember:
 
         # 恢复
         db_session.execute(text(
-            "UPDATE mem_member SET gift_balance=0.00, balance=500.00, level_id=3, "
-            "total_consume=0, consume_count=0, points=100 WHERE id=1"
+            "UPDATE mem_member SET gift_balance=30.00, balance=386.50, level_id=3, "
+            "total_consume=8642.30, consume_count=96, points=1286 WHERE id=1"
         ))
         db_session.execute(text(
             "UPDATE inv_stock SET quantity = quantity + 2 WHERE store_id=1 AND product_id=14"
