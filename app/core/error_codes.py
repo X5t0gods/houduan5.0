@@ -47,6 +47,8 @@ class ErrorCode(IntEnum):
     CATEGORY_INVALID = 2005               # 分类不存在或操作非法（包含层级超限、环引用、有子分类）
     CATEGORY_REFERENCED = 2006            # 分类被商品引用，只能停用不可删除
     PRODUCT_HAS_BUSINESS_FLOW = 2007      # 商品已产生业务流水，不可删除
+    # 阶段 7 新增：促销已触发不可删/改规则（spec 冲突表 ⑨）
+    PROMOTION_HAS_TRIGGER = 2008          # 该促销已有触发记录，请改为停用
 
     # ---------- 供应商 (3xxx) ----------
     SUPPLIER_DISABLED = 3001
@@ -85,6 +87,8 @@ class ErrorCode(IntEnum):
     PHONE_ALREADY_MEMBER = 9001
     AMOUNT_INVALID = 9002
     GIFT_RATIO_EXCEED = 9003
+    # 阶段 7 新增：会员不存在（spec 5.3 建议）
+    MEMBER_NOT_FOUND = 9004
 
     # ---------- 智能分析 (10xxx) ----------
     BI_DATA_NOT_ENOUGH = 10001
@@ -108,6 +112,7 @@ ERROR_MESSAGES: dict[int, str] = {
     ErrorCode.CATEGORY_INVALID: "分类不存在或操作非法",
     ErrorCode.CATEGORY_REFERENCED: "该分类已被商品引用，只能停用不可删除",
     ErrorCode.PRODUCT_HAS_BUSINESS_FLOW: "该商品已产生业务流水，不可删除",
+    ErrorCode.PROMOTION_HAS_TRIGGER: "该促销已有触发记录，请改为停用",
     ErrorCode.SUPPLIER_DISABLED: "供应商已停用",
     ErrorCode.ORDER_STATUS_INVALID: "当前单据状态不允许收货",
     ErrorCode.RECEIVE_QTY_EXCEED: "收货数量超出订单剩余数量",
@@ -130,6 +135,7 @@ ERROR_MESSAGES: dict[int, str] = {
     ErrorCode.PHONE_ALREADY_MEMBER: "该手机号已是会员",
     ErrorCode.AMOUNT_INVALID: "金额不合法",
     ErrorCode.GIFT_RATIO_EXCEED: "赠送比例超出限制",
+    ErrorCode.MEMBER_NOT_FOUND: "会员不存在",
     ErrorCode.BI_DATA_NOT_ENOUGH: "交易数据不足，无法进行关联分析",
     ErrorCode.BI_PARAM_INVALID: "挖掘参数不合法",
 }
