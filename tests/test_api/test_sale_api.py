@@ -57,7 +57,7 @@ def cleanup_api_sale_data() -> Generator[None, None, None]:
         s.execute(text("DELETE FROM sal_session WHERE session_no LIKE 'JB%' AND sale_count=0"))
         # 恢复库存
         s.execute(text(
-            "UPDATE inv_stock SET quantity=120 WHERE store_id=1 AND product_id=14"
+            "UPDATE inv_stock SET quantity=168 WHERE store_id=1 AND product_id=14"
         ))
         # 恢复促销统计
         s.execute(text("UPDATE pro_promotion SET trigger_count=0, discount_total=0.00"))

@@ -65,7 +65,7 @@ def cleanup_test_trades() -> Generator[None, None, None]:
         s.execute(text("DELETE FROM sal_hold WHERE cart_json LIKE '%TEST%'"))
         # 恢复库存（product_id=14 可口可乐）
         s.execute(text(
-            "UPDATE inv_stock SET quantity=120 WHERE store_id=1 AND product_id=14"
+            "UPDATE inv_stock SET quantity=168 WHERE store_id=1 AND product_id=14"
         ))
         # 恢复会员
         s.execute(text(
