@@ -9,10 +9,14 @@ CP2：充值（幂等+分开记账）/流水/积分调整/消费档案/导出
 
 from __future__ import annotations
 
+import io
 from datetime import date, datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -20,15 +24,25 @@ from app.core.error_codes import ErrorCode
 from app.core.exceptions import BusinessError
 from app.core.logging import get_logger
 from app.core.sequence import NoSeqService
+from app.core.sys_config_reader import get_config
 from app.repositories import member_flow_repository as flow_repo
 from app.repositories import member_repository as repo
 from app.repositories.auth_repository import write_operation_log
 from app.schemas.member import (
+    BalanceFlow,
+    FavoriteCategory,
     Member,
     MemberCreate,
     MemberLevel,
     MemberLevelUpdate,
+    MemberProfile,
     MemberUpdate,
+    PointAdjustParams,
+    PointAdjustResult,
+    PointFlow,
+    RechargeParams,
+    RechargeResult,
+    TopProduct,
 )
 from app.utils.money import ZERO, money
 
@@ -349,3 +363,387 @@ def update_level(
         benefit_desc=updated.benefit_desc,
         status=updated.status,
     )
+
+
+# ---------- 5.9 POST /members/{id}/recharge（幂等 + 分开记账） ----------
+
+
+def recharge(
+    session: Session, member_id: int, params: RechargeParams, *, operator_id: int
+) -> RechargeResult:
+    """会员充值（spec 5.9，本阶段核心）。
+
+    ⚠️ 幂等三步（同阶段4结算）：
+    1. 按 request_id 查 mem_balance_flow，命中直接返回首次结果
+    2. 未命中走正常流程
+    3. 依赖 uk_request_id 兵底：捕 IntegrityError 后重查返回首次结果
+
+    ⚠️ 分开记账（文档 1871 行）：写 2 条流水 RECHARGE（本金）+ GIFT（赠送），
+       ⛔ 只有第一条带 request_id（两条都带会撞 uk_request_id 报 500）。
+    """
+    amount = money(params.amount or ZERO)
+    gift_amount = money(params.gift_amount or ZERO)
+    request_id = params.request_id
+
+    # ---- 幂等第一步：查已有 ----
+    if request_id:
+        existing = flow_repo.find_balance_flow_by_request_id(session, request_id)
+        if existing is not None:
+            m = repo.get_member_by_id(session, existing.member_id)
+            logger.info(f"充值幂等命中：request_id={request_id}")
+            return RechargeResult(balance=m.balance, gift_balance=m.gift_balance)
+
+    # ---- 校验 ----
+    if amount <= ZERO and gift_amount <= ZERO:
+        raise BusinessError(ErrorCode.AMOUNT_INVALID, "充值金额与赠送金额不能同时为 0")
+    member = repo.get_member_by_id(session, member_id)
+    if member is None:
+        raise BusinessError(ErrorCode.MEMBER_NOT_FOUND, f"会员 id={member_id} 不存在")
+    if member.status != STATUS_NORMAL:
+        raise BusinessError(ErrorCode.MEMBER_NOT_FOUND, "冻结/挂失会员不允许充值")
+    # 赠送比例限制（spec 4.4）：amount>0 且 gift/amount > 阈值 → 9003
+    if amount > ZERO:
+        gift_ratio_limit = Decimal(str(get_config(session, "mem.gift_ratio_limit", "0.50")))
+        if gift_amount / amount > gift_ratio_limit:
+            raise BusinessError(
+                ErrorCode.GIFT_RATIO_EXCEED,
+                f"赠送比例({gift_amount / amount:.0%})超过上限({gift_ratio_limit:.0%})",
+            )
+
+    # ---- 事务：加余额 + 分开记账 ----
+    before_balance = member.balance
+    before_gift = member.gift_balance
+    after_balance = money(before_balance + amount)
+    after_gift = money(before_gift + gift_amount)
+
+    # 先更新余额（增量表达式）
+    repo.update_member(session, member_id, {
+        "balance": after_balance,
+        "gift_balance": after_gift,
+    })
+
+    seq = NoSeqService(session)
+    recharge_no = seq.next_no("CZ")
+
+    request_id_used = False
+    # 本金流水 RECHARGE
+    if amount > ZERO:
+        flow_repo.insert_balance_flow(
+            session,
+            member_id=member_id,
+            flow_type="RECHARGE",
+            amount=amount,
+            gift_amount=ZERO,
+            direction=1,
+            before_balance=before_balance,
+            after_balance=after_balance,
+            before_gift=before_gift,
+            after_gift=before_gift,  # 本条不改赠送
+            pay_method=params.pay_method,
+            source_no=recharge_no,
+            request_id=request_id if request_id else None,
+            operator=operator_id,
+            remark=params.remark,
+        )
+        request_id_used = bool(request_id)
+    # 赠送流水 GIFT
+    if gift_amount > ZERO:
+        flow_repo.insert_balance_flow(
+            session,
+            member_id=member_id,
+            flow_type="GIFT",
+            amount=ZERO,
+            gift_amount=gift_amount,
+            direction=1,
+            before_balance=after_balance,  # 本金已变
+            after_balance=after_balance,
+            before_gift=before_gift,
+            after_gift=after_gift,
+            pay_method=params.pay_method,
+            source_no=recharge_no,
+            # ⛔ 只有第一条带 request_id；若本金为0（纯赠送）则本条带
+            request_id=request_id if (request_id and not request_id_used) else None,
+            operator=operator_id,
+            remark=params.remark,
+        )
+
+    write_operation_log(
+        session, user_id=operator_id, user_name=None,
+        module="会员", action="会员充值",
+        target_type="mem_member", target_id=member_id,
+        after_value={"recharge_no": recharge_no, "amount": str(amount), "gift": str(gift_amount)},
+        result=1,
+    )
+
+    # ---- 幂等第三步：commit 时 IntegrityError（uk_request_id）兵底 ----
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        if request_id:
+            existing = flow_repo.find_balance_flow_by_request_id(session, request_id)
+            if existing is not None:
+                m = repo.get_member_by_id(session, existing.member_id)
+                logger.info(f"充值幂等兵底（IntegrityError）：request_id={request_id}")
+                return RechargeResult(balance=m.balance, gift_balance=m.gift_balance)
+        raise
+
+    logger.info(f"会员充值：member_id={member_id}, amount={amount}, gift={gift_amount}")
+    return RechargeResult(balance=after_balance, gift_balance=after_gift)
+
+
+# ---------- 5.10 / 5.11 会员流水 ----------
+
+
+def list_balance_flows(
+    session: Session, *, page: int = 1, page_size: int = 20,
+    member_id: int | None = None, flow_type: str | None = None,
+) -> tuple[list[BalanceFlow], int]:
+    """储值流水列表（spec 5.10）。"""
+    rows, total = flow_repo.list_balance_flows(
+        session, page=page, page_size=page_size, member_id=member_id, flow_type=flow_type,
+    )
+    result = [
+        BalanceFlow(
+            id=f.id, member_id=f.member_id, member_name=mname, member_no=mno,
+            flow_type=f.flow_type, amount=f.amount, gift_amount=f.gift_amount,
+            direction=f.direction, before_balance=f.before_balance,
+            after_balance=f.after_balance, pay_method=f.pay_method,
+            source_no=f.source_no, operator_name=oname, remark=f.remark,
+            created_at=f.created_at,
+        )
+        for f, mname, mno, oname in rows
+    ]
+    return result, total
+
+
+def list_point_flows(
+    session: Session, *, page: int = 1, page_size: int = 20,
+    member_id: int | None = None, flow_type: str | None = None,
+) -> tuple[list[PointFlow], int]:
+    """积分流水列表（spec 5.11）。"""
+    rows, total = flow_repo.list_point_flows(
+        session, page=page, page_size=page_size, member_id=member_id, flow_type=flow_type,
+    )
+    result = [
+        PointFlow(
+            id=f.id, member_id=f.member_id, member_name=mname, member_no=mno,
+            flow_type=f.flow_type, points=f.points, direction=f.direction,
+            before_points=f.before_points, after_points=f.after_points,
+            source_no=f.source_no, operator_name=oname, remark=f.remark,
+            created_at=f.created_at,
+        )
+        for f, mname, mno, oname in rows
+    ]
+    return result, total
+
+
+# ---------- 5.12 POST /members/{id}/points/adjust ----------
+
+
+def adjust_points(
+    session: Session, member_id: int, params: PointAdjustParams, *, operator_id: int
+) -> PointAdjustResult:
+    """积分手工调整（spec 5.12）。
+
+    ⚠️ points 正数增加/负数扣减；reason 必填（2001）；扣减后不能为负（9002）。
+    """
+    if not params.reason or not params.reason.strip():
+        raise BusinessError(ErrorCode.REQUIRED_MISSING, "积分调整必须填写原因")
+    if params.points == 0:
+        raise BusinessError(ErrorCode.REQUIRED_MISSING, "调整积分不能为 0")
+
+    member = repo.get_member_by_id(session, member_id)
+    if member is None:
+        raise BusinessError(ErrorCode.MEMBER_NOT_FOUND, f"会员 id={member_id} 不存在")
+
+    before_points = member.points
+    after_points = before_points + params.points
+    if after_points < 0:
+        raise BusinessError(ErrorCode.AMOUNT_INVALID, f"积分不足（当前 {before_points}）")
+
+    repo.update_member(session, member_id, {"points": after_points})
+    flow_repo.insert_point_flow(
+        session,
+        member_id=member_id,
+        flow_type="ADJUST",
+        points=abs(params.points),
+        direction=1 if params.points > 0 else -1,
+        before_points=before_points,
+        after_points=after_points,
+        source_no=None,
+        operator=operator_id,
+        remark=params.reason,
+    )
+    write_operation_log(
+        session, user_id=operator_id, user_name=None,
+        module="会员", action="积分调整",
+        target_type="mem_member", target_id=member_id,
+        after_value={"points_delta": params.points, "reason": params.reason},
+        result=1,
+    )
+    session.commit()
+    return PointAdjustResult(points=after_points)
+
+
+# ---------- 5.13 GET /members/{id}/profile ----------
+
+
+def get_member_profile(session: Session, member_id: int) -> MemberProfile:
+    """会员消费档案（spec 5.13）。
+
+    ⚠️ avg_price = total_consume / consume_count（count=0 → 0，不除零）。
+    ⚠️ favorite_categories/top_products 从 sal_trade_item 聚合（只统计 status!=VOID）。
+    ⚠️ 当前 sal_trade 无初始数据 → 数组为空（正常）。
+    """
+    from sqlalchemy import func, select
+
+    from app.models.sal_models import SalTrade, SalTradeItem
+
+    member = repo.get_member_by_id(session, member_id)
+    if member is None:
+        raise BusinessError(ErrorCode.MEMBER_NOT_FOUND, f"会员 id={member_id} 不存在")
+
+    # avg_price（除零保护）
+    if member.consume_count and member.consume_count > 0:
+        avg_price = money(member.total_consume / Decimal(member.consume_count))
+    else:
+        avg_price = ZERO
+
+    # favorite_categories TOP5：sal_trade_item 无 category_id，需 JOIN prd_product 取分类
+    cat_rows = _query_favorite_categories(session, member_id)
+    total_for_ratio = sum((r[1] for r in cat_rows), ZERO) if cat_rows else ZERO
+    favorite = [
+        FavoriteCategory(
+            name=name,
+            ratio=float(money(amt / total_for_ratio)) if total_for_ratio > ZERO else 0.0,
+        )
+        for name, amt in cat_rows
+    ]
+
+    # top_products TOP10：按数量（sal_trade_item 有 product_name 快照）
+    prod_rows = session.execute(
+        select(SalTradeItem.product_name, func.sum(SalTradeItem.quantity).label("qty"))
+        .join(SalTrade, SalTrade.id == SalTradeItem.trade_id)
+        .where(SalTrade.member_id == member_id, SalTrade.status != "VOID")
+        .group_by(SalTradeItem.product_name)
+        .order_by(func.sum(SalTradeItem.quantity).desc())
+        .limit(10)
+    ).all()
+    top_products = [
+        TopProduct(name=name, qty=float(qty)) for name, qty in prod_rows
+    ]
+
+    return MemberProfile(
+        member_id=member_id,
+        member_no=member.member_no,
+        real_name=member.real_name,
+        total_consume=member.total_consume,
+        consume_count=member.consume_count,
+        avg_price=avg_price,
+        favorite_categories=favorite,
+        top_products=top_products,
+    )
+
+
+def _query_favorite_categories(session: Session, member_id: int) -> list[tuple]:
+    """偏好品类 TOP5：sal_trade_item JOIN sal_trade JOIN prd_product JOIN prd_category。"""
+    from sqlalchemy import func, select
+
+    from app.models.prd_models import PrdCategory, PrdProduct
+    from app.models.sal_models import SalTrade, SalTradeItem
+
+    return list(session.execute(
+        select(PrdCategory.category_name, func.sum(SalTradeItem.amount).label("amt"))
+        .join(SalTrade, SalTrade.id == SalTradeItem.trade_id)
+        .join(PrdProduct, PrdProduct.id == SalTradeItem.product_id)
+        .join(PrdCategory, PrdCategory.id == PrdProduct.category_id)
+        .where(SalTrade.member_id == member_id, SalTrade.status != "VOID")
+        .group_by(PrdCategory.category_name)
+        .order_by(func.sum(SalTradeItem.amount).desc())
+        .limit(5)
+    ).all())
+
+
+# ---------- 5.14 GET /members/export ----------
+
+
+def _mask_phone(phone: str) -> str:
+    """手机号脱敏：中间 4 位打码（138****8866）。"""
+    if not phone or len(phone) < 7:
+        return phone or ""
+    return phone[:3] + "****" + phone[-4:]
+
+
+_EXPORT_HEADERS = [
+    "会员卡号", "姓名", "手机号", "等级", "本金余额", "赠送余额",
+    "积分", "累计消费", "消费笔数", "最近消费", "状态",
+]
+_EXPORT_MAX_ROWS = 10000
+_STATUS_NAMES = {0: "冻结", 1: "正常", 2: "挂失"}
+
+
+def export_members(
+    session: Session, *, operator_id: int,
+    keyword: str | None = None, level_id: int | None = None,
+) -> tuple[bytes, str]:
+    """会员导出（spec 5.14）：xlsx 文件流 + 手机号脱敏 + 记操作日志。
+
+    ⚠️ 返回 (xlsx 字节流, ASCII 文件名)。行数上限 10000。
+    """
+    rows, total = repo.list_members(
+        session, page=1, page_size=_EXPORT_MAX_ROWS, keyword=keyword, level_id=level_id,
+    )
+    if total > _EXPORT_MAX_ROWS:
+        raise BusinessError(
+            ErrorCode.REQUIRED_MISSING,
+            f"导出数据超上限（{total} > {_EXPORT_MAX_ROWS}），请缩小范围",
+        )
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "会员"
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill("solid", fgColor="4472C4")
+    center = Alignment(horizontal="center", vertical="center")
+    ws.append(_EXPORT_HEADERS)
+    for cell in ws[1]:
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = center
+
+    for m, level_name, _discount in rows:
+        ws.append([
+            m.member_no,
+            m.real_name or "",
+            _mask_phone(m.phone),  # ⛔ 脱敏
+            level_name or "",
+            float(m.balance),
+            float(m.gift_balance),
+            m.points,
+            float(m.total_consume),
+            m.consume_count,
+            m.last_consume_at.strftime("%Y-%m-%d %H:%M:%S") if m.last_consume_at else "",
+            _STATUS_NAMES.get(m.status, str(m.status)),
+        ])
+
+    widths = [16, 12, 16, 12, 12, 12, 10, 14, 10, 20, 8]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[chr(64 + i)].width = w
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    # ⛔ 导出行为记入操作日志（文档 1913 行）
+    write_operation_log(
+        session, user_id=operator_id, user_name=None,
+        module="会员", action="导出会员",
+        target_type="mem_member", target_id=None,
+        after_value={"count": total},
+        result=1,
+    )
+    session.commit()
+
+    today = datetime.now(ZoneInfo(settings.TZ)).strftime("%Y%m%d")
+    return buf.getvalue(), f"members_{today}.xlsx"

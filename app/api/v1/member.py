@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 
 from app.core.permissions import Perm
 from app.core.response import success
@@ -38,10 +38,15 @@ from app.schemas.member import (
     MemberSearchRequest,
     MemberStatusUpdate,
     MemberUpdate,
+    PointAdjustParams,
+    RechargeParams,
 )
 from app.services import member_service
 
 router = APIRouter(prefix="/members", tags=["会员管理"])
+
+# xlsx 标准 MIME（导出用）
+_XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 # ---------- 1. GET /members ----------
@@ -131,6 +136,77 @@ def update_level(
     return success(result.model_dump(mode="json"))
 
 
+# ---------- 10. GET /members/balance-flows ----------
+# ⚠️ 静态段，必须在 /members/{member_id} 之前
+
+
+@router.get("/balance-flows", summary="储值流水")
+def list_balance_flows(
+    db: DbSession,
+    _: Annotated[Any, Depends(require_perm(Perm.MEMBER_DETAIL))],
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    member_id: Annotated[int | None, Query()] = None,
+    flow_type: Annotated[str | None, Query()] = None,
+) -> dict[str, Any]:
+    """GET /members/balance-flows —— 储值流水（含 member_name/operator_name）。"""
+    items, total = member_service.list_balance_flows(
+        db, page=page, page_size=page_size, member_id=member_id, flow_type=flow_type,
+    )
+    return success({
+        "list": [it.model_dump(mode="json") for it in items],
+        "total": total, "page": page, "page_size": page_size,
+    })
+
+
+# ---------- 11. GET /members/point-flows ----------
+
+
+@router.get("/point-flows", summary="积分流水")
+def list_point_flows(
+    db: DbSession,
+    _: Annotated[Any, Depends(require_perm(Perm.MEMBER_DETAIL))],
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    member_id: Annotated[int | None, Query()] = None,
+    flow_type: Annotated[str | None, Query()] = None,
+) -> dict[str, Any]:
+    """GET /members/point-flows —— 积分流水。"""
+    items, total = member_service.list_point_flows(
+        db, page=page, page_size=page_size, member_id=member_id, flow_type=flow_type,
+    )
+    return success({
+        "list": [it.model_dump(mode="json") for it in items],
+        "total": total, "page": page, "page_size": page_size,
+    })
+
+
+# ---------- 14. GET /members/export ----------
+
+
+@router.get(
+    "/export",
+    summary="会员导出",
+    description="xlsx 文件流（⛔不包统一响应体）；手机号脱敏 138****8866；导出记操作日志。",
+    response_class=Response,
+)
+def export_members(
+    db: DbSession,
+    current_user: Annotated[UserContext, Depends(require_perm(Perm.MEMBER_LIST))],
+    keyword: Annotated[str | None, Query()] = None,
+    level_id: Annotated[int | None, Query()] = None,
+) -> Response:
+    """GET /members/export —— 导出 xlsx（不走统一响应体）。"""
+    content, filename = member_service.export_members(
+        db, operator_id=current_user.user_id, keyword=keyword, level_id=level_id,
+    )
+    return Response(
+        content=content,
+        media_type=_XLSX_MEDIA_TYPE,
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
 # ---------- 3. GET /members/{member_id} ----------
 
 
@@ -182,3 +258,63 @@ def update_member_status(
         db, member_id, params.status, operator_id=current_user.user_id,
     )
     return success(None)
+
+
+# ---------- 9. POST /members/{member_id}/recharge ----------
+
+
+@router.post(
+    "/{member_id}/recharge",
+    summary="会员充值（幂等 + 分开记账）",
+    description=(
+        "**幂等三步**：同 request_id 重提返回首次结果（不重复加钱）。\n\n"
+        "⚠️ 分开记账：写 RECHARGE（本金）+ GIFT（赠送）2 条流水，⛔只第一条带 request_id；\n"
+        "赠送比例>mem.gift_ratio_limit(0.50)→9003；金额均0→9002；冻结会员→拒绝"
+    ),
+)
+def recharge(
+    member_id: int,
+    params: RechargeParams,
+    db: DbSession,
+    current_user: Annotated[UserContext, Depends(require_perm(Perm.MEMBER_LIST))],
+) -> dict[str, Any]:
+    """POST /members/{id}/recharge —— 会员充值。"""
+    result = member_service.recharge(db, member_id, params, operator_id=current_user.user_id)
+    return success(result.model_dump(mode="json"))
+
+
+# ---------- 12. POST /members/{member_id}/points/adjust ----------
+
+
+@router.post(
+    "/{member_id}/points/adjust",
+    summary="积分手工调整",
+    description="points 正增负减；reason 必填(2001)；扣减后不能为负(9002)。权限 member:level。",
+)
+def adjust_points(
+    member_id: int,
+    params: PointAdjustParams,
+    db: DbSession,
+    current_user: Annotated[UserContext, Depends(require_perm(Perm.MEMBER_LEVEL))],
+) -> dict[str, Any]:
+    """POST /members/{id}/points/adjust —— 积分调整。"""
+    result = member_service.adjust_points(db, member_id, params, operator_id=current_user.user_id)
+    return success(result.model_dump(mode="json"))
+
+
+# ---------- 13. GET /members/{member_id}/profile ----------
+
+
+@router.get(
+    "/{member_id}/profile",
+    summary="会员消费档案",
+    description="avg_price=total_consume/consume_count（count=0→0不除零）；偏好品类TOP5+常购TOP10。",
+)
+def get_member_profile(
+    member_id: int,
+    db: DbSession,
+    _: Annotated[Any, Depends(require_perm(Perm.MEMBER_DETAIL))],
+) -> dict[str, Any]:
+    """GET /members/{id}/profile —— 消费档案。"""
+    result = member_service.get_member_profile(db, member_id)
+    return success(result.model_dump(mode="json"))
