@@ -97,7 +97,9 @@ class PaymentParams(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     supplier_id: int
-    amount: Decimal = Field(gt=0)
+    # ⚠️ 不用 gt=0：否则 amount<=0 会在 Pydantic 层报 ValidationError，
+    # 到不了 service 的 9002 校验（spec 验收 22 要求 amount<=0 → 9002）
+    amount: Decimal
     pay_method: str = Field(description="CASH/TRANSFER/WECHAT/ALIPAY")
     pay_date: date
     remark: str | None = Field(default=None, max_length=255)
