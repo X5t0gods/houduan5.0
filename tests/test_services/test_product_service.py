@@ -40,6 +40,10 @@ def cleanup_test_products() -> Generator[None, None, None]:
                  "OR product_name LIKE '%待删%' OR product_name LIKE '%含额外字段%'")
         ).fetchall()
         for (pid,) in rows:
+            # ⚠️ 阶段 5：init_stock 会生成 inv_stock_flow/inv_stock/inv_batch，先删子表
+            s.execute(text("DELETE FROM inv_stock_flow WHERE product_id=:p"), {"p": pid})
+            s.execute(text("DELETE FROM inv_batch WHERE product_id=:p"), {"p": pid})
+            s.execute(text("DELETE FROM inv_stock WHERE product_id=:p"), {"p": pid})
             s.execute(text("DELETE FROM prd_barcode WHERE product_id=:p"), {"p": pid})
             s.execute(text("DELETE FROM prd_price_history WHERE product_id=:p"), {"p": pid})
             s.execute(text("DELETE FROM prd_product_tag WHERE product_id=:p"), {"p": pid})
@@ -144,26 +148,44 @@ class TestProductCreate:
         expected_code = f"P{int(current_val) + 1:06d}"
         assert result.product_code == expected_code
 
-    def test_init_stock_and_safe_stock_ignored(self, db_session: Session) -> None:
-        """⚠️ spec 1.2 ②：init_stock / safe_stock 应被 Pydantic extra='ignore' 忽略。"""
-        # 用 model_validate 模拟前端提交带额外字段的 payload
+    def test_init_stock_creates_stock_and_flow(self, db_session: Session) -> None:
+        """⚠️ 阶段 5 spec 5.11：init_stock>0 → 写 inv_stock + inv_stock_flow(INIT)。
+
+        （阶段 3 曾忽略，阶段 5 已补齐）unknown_field 仍被忽略。
+        """
         raw_payload = {
             "product_name": "含额外字段测试",
             "category_id": 111, "unit_id": 1,
             "purchase_price": "5.00", "sale_price": "8.00",
-            "init_stock": 100,       # 文档外字段
-            "safe_stock": 10,        # 文档外字段
-            "unknown_field": "xxx",  # 完全未知字段
+            "init_stock": 100,       # 阶段 5：期初库存
+            "safe_stock": 10,        # 阶段 5：安全库存
+            "unknown_field": "xxx",  # 完全未知字段（仍忽略）
         }
         params = ProductCreate.model_validate(raw_payload)
-        # 断言未知字段没进入模型
-        assert not hasattr(params, "init_stock")
-        assert not hasattr(params, "safe_stock")
+        # init_stock/safe_stock 现在进入模型（阶段 5），unknown_field 仍被忽略
+        assert params.init_stock == 100
+        assert params.safe_stock == 10
         assert not hasattr(params, "unknown_field")
-        # 但正常字段能创建
-        result = product_service.create_product(db_session, params, operator_id=1)
+
+        result = product_service.create_product(
+            db_session, params, operator_id=1, store_id=1,
+        )
         assert result.product_name == "含额外字段测试"
-        db_session.rollback()
+
+        # 验证 inv_stock 生成（quantity=100, safe_qty=10）+ INIT 流水
+        stock = db_session.execute(text(
+            "SELECT quantity, safe_qty FROM inv_stock WHERE product_id=:p"
+        ), {"p": result.id}).fetchone()
+        assert stock is not None
+        assert stock[0] == Decimal("100.000")
+        assert stock[1] == Decimal("10.000")
+        flow = db_session.execute(text(
+            "SELECT flow_type, direction, source_no FROM inv_stock_flow "
+            "WHERE product_id=:p ORDER BY id DESC LIMIT 1"
+        ), {"p": result.id}).fetchone()
+        assert flow[0] == "INIT"
+        assert flow[1] == 1
+        assert flow[2].startswith("QC")
 
 
 @pytest.mark.integration

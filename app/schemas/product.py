@@ -87,11 +87,9 @@ class ProductDetail(Product):
 class ProductCreate(BaseModel):
     """新增商品请求（POST /products）。
 
-    ⚠️ 前端 `{...form}` 会原样提交，包含文档外字段 `init_stock` / `safe_stock`
-       （spec 1.2 ②）。本模型**必须容忍并忽略**这些未知字段——Pydantic v2 默认
-       `extra='ignore'`，此处显式声明以示意图。
-
-    ⚠️ 本阶段不处理 init_stock（期初库存属阶段 5，需写 inv_stock + inv_stock_flow + 批次）。
+    ⚠️ 前端 `{...form}` 会原样提交，包含 `init_stock` / `safe_stock`。
+       阶段 3 曾忽略这两个字段，**阶段 5 已补齐**（spec 5.11）：
+       init_stock>0 时写 inv_stock + inv_stock_flow + （保质期商品）inv_batch。
 
     ⚠️ `product_code` 可选：不传由后端 `sys_no_seq` 自动生成（P+6位）；
        传了则校验唯一性（阶段 3 联调时前端可能会预填）。
@@ -127,6 +125,11 @@ class ProductCreate(BaseModel):
     # 条码：优先取 barcodes 数组，为空时退回 barcode 单值（前端两种提交都可能出现）
     barcodes: list[str] = Field(default_factory=list, description="条码数组（一品多码）")
     barcode: str | None = Field(default=None, max_length=32, description="单值条码（冗余字段，barcodes 为空时用）")
+
+    # 期初库存（阶段 5 补齐，spec 5.11）：仅**新增**时生效，编辑时忽略
+    # ⚠️ 前端 edit.vue 会提交这两个字段；init_stock>0 时写 inv_stock + inv_stock_flow + (保质期商品)inv_batch
+    init_stock: Decimal | None = Field(default=None, ge=0, description="期初库存（仅新增时生效，编辑忽略）")
+    safe_stock: Decimal | None = Field(default=None, ge=0, description="安全库存（写入 inv_stock.safe_qty）")
 
 
 class ProductUpdate(BaseModel):

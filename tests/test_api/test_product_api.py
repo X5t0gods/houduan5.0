@@ -22,7 +22,7 @@ from tests.test_api.conftest import login_as
 
 @pytest.fixture(autouse=True)
 def cleanup_api_test_products() -> Generator[None, None, None]:
-    """清理 API 测试留下的商品与条码。"""
+    """清理 API 测试留下的商品与条码（阶段 5：含期初库存 inv_stock/flow/batch）。"""
     yield
     s = SessionLocal()
     try:
@@ -31,6 +31,11 @@ def cleanup_api_test_products() -> Generator[None, None, None]:
                  "OR product_name LIKE 'API 测试%'")
         ).fetchall()
         for (pid,) in rows:
+            # ⚠️ 阶段 5：init_stock 会生成 inv_stock_flow/inv_stock/inv_batch，
+            # 必须先删这些子表才能删商品（否则 FK fk_flow_product 报错）
+            s.execute(text("DELETE FROM inv_stock_flow WHERE product_id=:p"), {"p": pid})
+            s.execute(text("DELETE FROM inv_batch WHERE product_id=:p"), {"p": pid})
+            s.execute(text("DELETE FROM inv_stock WHERE product_id=:p"), {"p": pid})
             s.execute(text("DELETE FROM prd_barcode WHERE product_id=:p"), {"p": pid})
             s.execute(text("DELETE FROM prd_price_history WHERE product_id=:p"), {"p": pid})
             s.execute(text("DELETE FROM prd_product WHERE id=:p"), {"p": pid})
@@ -167,18 +172,45 @@ class TestProductCreate:
         assert len(body["data"]["product_code"]) == 7
         assert body["data"]["barcodes"] == ["7777000000001"]
 
-    def test_init_stock_and_safe_stock_ignored(self, auth_client: TestClient,
+    def test_init_stock_creates_stock_and_flow(self, auth_client: TestClient,
                                                 admin_headers: dict) -> None:
-        """⚠️ spec 1.2 ②：前端提交的 init_stock / safe_stock 被忽略，不报错。"""
+        """⚠️ 阶段 5 spec 5.11：init_stock>0 → 写 inv_stock + inv_stock_flow(INIT)。
+
+        （阶段 3 曾忽略这两个字段，阶段 5 已补齐）
+        同时验证 safe_stock 写入 inv_stock.safe_qty，且容忍完全未知字段。
+        """
         r = auth_client.post("/api/v1/products", headers=admin_headers, json={
             "product_name": "API测试额外字段",
             "category_id": 111, "unit_id": 1,
             "purchase_price": 5.0, "sale_price": 8.0,
-            "init_stock": 100,       # 文档外字段
-            "safe_stock": 10,        # 文档外字段
-            "unknown_field": "xxx",  # 完全未知字段
+            "init_stock": 100,       # 阶段 5：期初库存
+            "safe_stock": 10,        # 阶段 5：安全库存
+            "unknown_field": "xxx",  # 完全未知字段（仍应被忽略）
         })
-        assert r.json()["code"] == 0, f"应容忍未知字段：{r.json()}"
+        body = r.json()
+        assert body["code"] == 0, f"应容忍未知字段：{body}"
+        pid = body["data"]["id"]
+
+        # 验证 inv_stock 生成（quantity=100, safe_qty=10）
+        s = SessionLocal()
+        try:
+            stock = s.execute(text(
+                "SELECT quantity, safe_qty FROM inv_stock WHERE product_id=:p"
+            ), {"p": pid}).fetchone()
+            assert stock is not None, "init_stock>0 应生成 inv_stock"
+            assert stock[0] == 100
+            assert stock[1] == 10
+            # 验证 INIT 流水
+            flow = s.execute(text(
+                "SELECT flow_type, direction, source_no FROM inv_stock_flow "
+                "WHERE product_id=:p ORDER BY id DESC LIMIT 1"
+            ), {"p": pid}).fetchone()
+            assert flow is not None
+            assert flow[0] == "INIT"
+            assert flow[1] == 1
+            assert flow[2].startswith("QC")
+        finally:
+            s.close()
 
     def test_sale_below_purchase_returns_2003(self, auth_client: TestClient,
                                               admin_headers: dict) -> None:

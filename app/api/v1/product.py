@@ -268,7 +268,10 @@ def create_product(
     Returns:
         统一响应体，data = ProductDetail（含新分配的 id/product_code）。
     """
-    detail = product_service.create_product(db, params, operator_id=current_user.user_id)
+    detail = product_service.create_product(
+        db, params, operator_id=current_user.user_id,
+        store_id=current_user.store_id or 1,
+    )
     return success(detail.model_dump(mode="json"))
 
 

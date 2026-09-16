@@ -8,25 +8,31 @@
 3. **价格历史**（spec 4.4）：三个价（进价/售价/会员价）**哪个变了单独写一条**，三个都没变不写
 4. **删除保护**（spec 4.6）：先查 11 张业务流水表，任一有记录 → 2007；否则先删配置子表再删商品
 5. **导入独立事务**（spec 4.13）：每行 commit 一次，某行失败不影响其他行；批内重复预先扫描
-6. **忽略 init_stock/safe_stock**（spec 1.2 ②）：期初入库属阶段 5，本阶段不落库不写流水
+6. **期初库存 init_stock**（阶段 5 补齐，spec 5.11）：仅新增时生效，写 inv_stock +
+   inv_stock_flow + （保质期商品）inv_batch；编辑时忽略（避免误改库存）
 """
 
 from __future__ import annotations
 
 import io
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.error_codes import ErrorCode
 from app.core.exceptions import BusinessError
 from app.core.logging import get_logger
 from app.core.sequence import NoSeqService
+from app.models.inv_models import InvBatch, InvStock
 from app.repositories import auth_repository, category_repository, unit_repository
+from app.repositories import inventory_write_repository as inv_write
 from app.repositories import product_repository as repo
 from app.schemas.product import (
     IMPORT_COLUMN_ORDER,
@@ -37,6 +43,7 @@ from app.schemas.product import (
     ProductDetail,
     ProductUpdate,
 )
+from app.utils.money import money
 
 logger = get_logger(__name__)
 
@@ -168,6 +175,85 @@ def _resolve_barcodes(params_barcodes: list[str] | None, params_barcode: str | N
     return []
 
 
+def _apply_init_stock(
+    session: Session,
+    *,
+    product,
+    init_stock: Decimal,
+    safe_stock: Decimal,
+    store_id: int,
+    operator_id: int,
+) -> None:
+    """写入期初库存（spec 5.11）——仅新增商品时调用，与商品插入同一事务。
+
+    步骤：
+    1. upsert inv_stock（quantity=init_stock, safe_qty=safe_stock, avg_cost=purchase_price）
+    2. 写 inv_stock_flow（INIT, direction=1, source_no=QC取号, remark='期初建账'）
+    3. 若 is_perishable=1 且 shelf_life_days>0：写 inv_batch（batch_no=BATCH取号）
+
+    ⚠️ before_qty 取 upsert 前的原数量（新商品通常为 0）。
+    ⚠️ 只 flush 不 commit（与外层 create_product 同一事务）。
+    """
+    now = datetime.now(ZoneInfo(settings.TZ))
+    purchase_price = product.purchase_price or Decimal("0")
+
+    # 1. upsert inv_stock（新商品一般无记录，走新建分支）
+    before_qty, after_qty = inv_write.upsert_stock_add(
+        session,
+        store_id=store_id,
+        product_id=product.id,
+        quantity=init_stock,
+        avg_cost=purchase_price,
+    )
+    # safe_qty 写入（upsert_stock_add 新建时 safe_qty=0，这里补上）
+    if safe_stock and safe_stock > 0:
+        session.execute(
+            InvStock.__table__.update()
+            .where(
+                (InvStock.__table__.c.store_id == store_id)
+                & (InvStock.__table__.c.product_id == product.id)
+            )
+            .values(safe_qty=safe_stock)
+        )
+
+    # 2. 期初单号 QC + 写流水
+    seq = NoSeqService(session)
+    init_no = seq.next_no("QC")
+    inv_write.write_stock_flow(
+        session,
+        store_id=store_id,
+        product_id=product.id,
+        flow_type="INIT",
+        direction=1,
+        quantity=init_stock,
+        before_qty=before_qty,
+        after_qty=after_qty,
+        unit_cost=purchase_price,
+        amount=money(init_stock * purchase_price),
+        source_type="INIT",
+        source_no=init_no,
+        operator=operator_id,
+        remark="期初建账",
+    )
+
+    # 3. 保质期商品建批次
+    if product.is_perishable == 1 and product.shelf_life_days and product.shelf_life_days > 0:
+        batch_no = seq.next_no("BATCH", scope=product.product_code)
+        today = now.date()
+        session.add(InvBatch(
+            batch_no=batch_no,
+            product_id=product.id,
+            store_id=store_id,
+            production_date=today,
+            expiry_date=today + timedelta(days=product.shelf_life_days),
+            init_qty=init_stock,
+            remain_qty=init_stock,
+            unit_cost=purchase_price,
+            status=1,
+        ))
+        session.flush()
+
+
 # ---------- 4.1 GET /products ----------
 
 
@@ -217,12 +303,13 @@ def get_product_detail(session: Session, product_id: int, store_id: int = 0) -> 
 
 
 def create_product(
-    session: Session, params: ProductCreate, operator_id: int,
+    session: Session, params: ProductCreate, operator_id: int, store_id: int = 1,
 ) -> ProductDetail:
     """新增商品。
 
-    ⚠️ 事务：prd_product + prd_barcode（可能多条）在同一事务，最后一次 commit。
-    ⚠️ init_stock / safe_stock 已被 Pydantic `extra='ignore'` 忽略（spec 1.2 ②）。
+    ⚠️ 事务：prd_product + prd_barcode（可能多条）+ 期初库存在同一事务，最后一次 commit。
+    ⚠️ init_stock / safe_stock 阶段 5 已补齐（spec 5.11）：init_stock>0 时写
+       inv_stock + inv_stock_flow + （保质期商品）inv_batch。
 
     Raises:
         BusinessError: 2001/2002/2003/2005。
@@ -282,6 +369,16 @@ def create_product(
         # 插入条码
         if barcodes:
             repo.insert_barcodes(session, product.id, barcodes)
+        # 期初库存（阶段 5 补齐，spec 5.11）：init_stock>0 时写 inv_stock + 流水 + 批次
+        if params.init_stock and params.init_stock > 0:
+            _apply_init_stock(
+                session,
+                product=product,
+                init_stock=params.init_stock,
+                safe_stock=params.safe_stock or Decimal("0"),
+                store_id=store_id,
+                operator_id=operator_id,
+            )
     except IntegrityError as e:
         session.rollback()
         # 并发场景兜底（唯一索引冲突）
