@@ -27,14 +27,22 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 
 from app.core.permissions import Perm
 from app.core.response import success
 from app.deps import DbSession, UserContext, require_perm, resolve_store_filter
-from app.services import inventory_service
+from app.schemas.inventory import (
+    CheckAuditRequest,
+    CheckCreateRequest,
+    CheckItemsUpdateRequest,
+)
+from app.services import check_service, inventory_service
 
 router = APIRouter(prefix="/inventory", tags=["库存管理"])
+
+# xlsx 标准 MIME（文档写的 application/vnd.ms-excel 是笔误，spec 5.3）
+_XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 # ---------- 1. GET /inventory ----------
@@ -113,6 +121,44 @@ def list_flows(
     })
 
 
+# ---------- 3. GET /inventory/flows/export ----------
+
+
+@router.get(
+    "/flows/export",
+    summary="库存流水导出",
+    description=(
+        "返回 **xlsx 文件流**，⛔ **不包统一响应体**\n\n"
+        "（前端 request.ts:88 检测到无 code 字段直接透传 blob）。\n"
+        "⚠️ 行数上限 10000，超出返回 2001；文件名用 ASCII（避免下载乱码）"
+    ),
+    response_class=Response,
+)
+def export_flows(
+    db: DbSession,
+    current_user: Annotated[UserContext, Depends(require_perm(Perm.INV_FLOW))],
+    keyword: Annotated[str | None, Query()] = None,
+    flow_type: Annotated[str | None, Query()] = None,
+    start_date: Annotated[str | None, Query()] = None,
+    end_date: Annotated[str | None, Query()] = None,
+) -> Response:
+    """GET /inventory/flows/export —— 导出 xlsx（不走统一响应体）。"""
+    store_filter = resolve_store_filter(current_user)
+    content, filename = inventory_service.export_flows(
+        db,
+        keyword=keyword,
+        flow_type=flow_type,
+        store_id=store_filter,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    return Response(
+        content=content,
+        media_type=_XLSX_MEDIA_TYPE,
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
 # ---------- 4. GET /inventory/warnings ----------
 
 
@@ -134,3 +180,128 @@ def get_warnings(
     effective_store = store_id if store_id is not None else resolve_store_filter(current_user)
     result = inventory_service.get_warnings(db, effective_store)
     return success(result.model_dump(mode="json"))
+
+
+# ---------- 5. GET /inventory/checks ----------
+
+
+@router.get(
+    "/checks",
+    summary="盘点单列表",
+)
+def list_checks(
+    db: DbSession,
+    current_user: Annotated[UserContext, Depends(require_perm(Perm.INV_CHECK))],
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    status: Annotated[str | None, Query()] = None,
+) -> dict[str, Any]:
+    """GET /inventory/checks —— 盘点单列表。"""
+    store_filter = resolve_store_filter(current_user)
+    items, total = check_service.list_checks(
+        db, page=page, page_size=page_size, status=status, store_id=store_filter,
+    )
+    return success({
+        "list": [it.model_dump(mode="json") for it in items],
+        "total": total, "page": page, "page_size": page_size,
+    })
+
+
+# ---------- 7. POST /inventory/checks ----------
+
+
+@router.post(
+    "/checks",
+    summary="创建盘点单（冻结快照）",
+    description=(
+        "取号 PD → 写主表 → 批量生成明细（book_qty=snapshot_qty=当前 quantity）。\n\n"
+        "⚠️ check_type=ALL 全盘 / CATEGORY 按分类（递归子分类）/ SHELF 按货架 / PART 退化为全盘"
+    ),
+)
+def create_check(
+    params: CheckCreateRequest,
+    db: DbSession,
+    current_user: Annotated[UserContext, Depends(require_perm(Perm.INV_CHECK))],
+) -> dict[str, Any]:
+    """POST /inventory/checks —— 创建盘点单。"""
+    store_id = current_user.store_id or 1
+    result = check_service.create_check(
+        db, params, store_id=store_id, user_id=current_user.user_id,
+    )
+    return success(result.model_dump(mode="json"))
+
+
+# ---------- 6. GET /inventory/checks/{check_id} ----------
+
+
+@router.get(
+    "/checks/{check_id}",
+    summary="盘点单详情",
+)
+def get_check_detail(
+    check_id: int,
+    db: DbSession,
+    _: Annotated[Any, Depends(require_perm(Perm.INV_CHECK))],
+) -> dict[str, Any]:
+    """GET /inventory/checks/{id} —— 详情（含明细）。"""
+    result = check_service.get_check_detail(db, check_id)
+    return success(result.model_dump(mode="json"))
+
+
+# ---------- 8. PUT /inventory/checks/{check_id}/items ----------
+
+
+@router.put(
+    "/checks/{check_id}/items",
+    summary="录入实盘数量",
+    description="服务端重算 diff_qty/diff_rate/profit_loss（不信任前端）。只 DRAFT 可录入。",
+)
+def update_check_items(
+    check_id: int,
+    params: CheckItemsUpdateRequest,
+    db: DbSession,
+    _: Annotated[Any, Depends(require_perm(Perm.INV_CHECK))],
+) -> dict[str, Any]:
+    """PUT /inventory/checks/{id}/items —— 录入实盘。"""
+    check_service.update_check_items(db, check_id, params.items)
+    return success(None)
+
+
+# ---------- 9. POST /inventory/checks/{check_id}/submit ----------
+
+
+@router.post(
+    "/checks/{check_id}/submit",
+    summary="提交盘点审核",
+    description="actual_qty 未填按 snapshot 补齐；diff_qty≠0 必须有 diff_reason（否则 5001）。",
+)
+def submit_check(
+    check_id: int,
+    db: DbSession,
+    _: Annotated[Any, Depends(require_perm(Perm.INV_CHECK))],
+) -> dict[str, Any]:
+    """POST /inventory/checks/{id}/submit —— 提交审核。"""
+    check_service.submit_check(db, check_id)
+    return success(None)
+
+
+# ---------- 10. POST /inventory/checks/{check_id}/audit ----------
+
+
+@router.post(
+    "/checks/{check_id}/audit",
+    summary="审核盘点（生成调整流水）",
+    description=(
+        "approved=true → 增量调整库存 + 写 CHECK_ADJUST 流水（⛔ 不是覆盖）；\n"
+        "approved=false → 驳回回 DRAFT。审核后库存为负则拒绝（绝不落负库存）。"
+    ),
+)
+def audit_check(
+    check_id: int,
+    params: CheckAuditRequest,
+    db: DbSession,
+    current_user: Annotated[UserContext, Depends(require_perm(Perm.INV_CHECK))],
+) -> dict[str, Any]:
+    """POST /inventory/checks/{id}/audit —— 审核盘点。"""
+    check_service.audit_check(db, check_id, params, auditor_id=current_user.user_id)
+    return success(None)
