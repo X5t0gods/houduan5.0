@@ -9,25 +9,39 @@
 | 5 | GET  | /sales/trades/{id}  | pos:use | 否 |
 | 6 | POST | /sales/trades/return | pos:use | 否 |
 | 7 | POST | /sales/trades/{id}/void | pos:use | 否 |
-| 8-11 | ... | /sales/holds* | pos:use | 否 |
-| 12 | POST | /sales/trades/{id}/receipt | pos:use | 否 |
-| 13 | GET  | /sales/sessions/current | pos:session | 否 |
-| 14 | POST | /sales/sessions/close | pos:session | 否 |
+| 8 | POST | /sales/holds        | pos:use | 否 |
+| 9 | GET  | /sales/holds        | pos:use | 否 |
+| 10| POST | /sales/holds/{holdNo}/resume | pos:use | 否 |
+| 11| DELETE| /sales/holds/{holdNo} | pos:use | 否 |
+| 12| POST | /sales/trades/{id}/receipt | pos:use | 否 |
+| 13| GET  | /sales/sessions/current | pos:session | 否 |
+| 14| POST | /sales/sessions/close | pos:session | 否 |
 
-⚠️ CP2 只实现 #1 与 #2；#3-#14 由 CP3/CP4 补齐。
+⚠️ 路由顺序至关重要：
+   - `/sales/trades/return` 必须在 `/sales/trades/{id}` 之前（否则 "return" 被解析为 id）
+   - `/sales/trades/{id}/void` 和 `/sales/trades/{id}/receipt` 放最后
 """
 
 from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from app.core.permissions import Perm
 from app.core.response import success
-from app.deps import DbSession, require_perm
-from app.schemas.sale import CartCalcRequest, CartResolveRequest
-from app.services import cart_service
+from app.deps import DbSession, UserContext, require_perm, resolve_store_filter
+from app.schemas.sale import (
+    CartCalcRequest,
+    CartResolveRequest,
+    HoldCreateRequest,
+    HoldOut,
+    SaleReturnCreateRequest,
+    SessionCloseRequest,
+    TradeCreateRequest,
+    VoidTradeRequest,
+)
+from app.services import cart_service, sale_service
 
 router = APIRouter(prefix="/sales", tags=["销售与收银"])
 
@@ -81,13 +95,7 @@ def resolve_cart(
         "⚠️ 关键约定（spec 5.4）：\n"
         "- `discount_amount` **不含会员折扣、不含积分抵扣**\n"
         "- 会员折扣由前端 `stores/pos.ts:57` 单独计算与展示（后端返回会重复扣减）\n"
-        "- `point_deduct` 恒为 0\n\n"
-        "⚠️ 促销引擎与前端 Mock `promotion-engine.ts` **逐行对拍**（阶段 4 CP1 已验证）：\n"
-        "- MEMBER 类型促销**不参与**计算（前端已单独处理会员折扣）\n"
-        "- CATEGORY 类型促销**递归匹配父分类**（商品挂三级、促销挂二级也能命中）\n"
-        "- COMBO 组合价**共享**（不累加多条明细的 promo_price）\n"
-        "- 满减基数 = totalAmount - accumulated（已生效优惠累计）\n"
-        "- `is_stackable=0` 的促销互斥（命中一个后其余不可叠加促销跳过）"
+        "- `point_deduct` 恒为 0"
     ),
 )
 def calc_cart(
@@ -95,14 +103,290 @@ def calc_cart(
     db: DbSession,
     _: Annotated[Any, Depends(require_perm(Perm.POS_USE))],
 ) -> dict[str, Any]:
-    """促销试算。
-
-    Args:
-        params: `{items: CartItem[], member_id?: number}`。
-        db: 数据库会话。
-
-    Returns:
-        统一响应体，data = CartCalcResult。
-    """
+    """促销试算。"""
     result = cart_service.calc_cart(db, params)
     return success(result.model_dump(mode="json"))
+
+
+# ---------- 3. POST /sales/trades ----------
+
+
+@router.post(
+    "/trades",
+    summary="结算（幂等）",
+    description=(
+        "**本阶段最核心接口**。前端传 items + payments + request_id，\n"
+        "后端重算全部优惠（促销 + 会员折扣 + 积分抵扣）并校验支付金额。\n\n"
+        "⚠️ 幂等：同一 request_id 重复提交返回首次结果（不重复扣库存/扣款）"
+    ),
+)
+def create_trade(
+    params: TradeCreateRequest,
+    db: DbSession,
+    current_user: Annotated[UserContext, Depends(require_perm(Perm.POS_USE))],
+) -> dict[str, Any]:
+    """POST /sales/trades —— 结算事务 T1。"""
+    store_id = current_user.store_id or 1
+    result = sale_service.settle_trade(
+        db, params,
+        store_id=store_id,
+        cashier_id=current_user.user_id,
+        cashier_name=current_user.real_name,
+    )
+    return success(result.model_dump(mode="json"))
+
+
+# ---------- 6. POST /sales/trades/return ----------
+# ⚠️ 必须在 /trades/{trade_id} 之前声明，否则 "return" 被当作 trade_id
+
+
+@router.post(
+    "/trades/return",
+    summary="销售退货",
+    description="退货回补库存、退款给会员（只退本金不退赠送）、扣回积分。",
+)
+def return_trade(
+    params: SaleReturnCreateRequest,
+    db: DbSession,
+    current_user: Annotated[UserContext, Depends(require_perm(Perm.POS_USE))],
+) -> dict[str, Any]:
+    """POST /sales/trades/return —— 退货。"""
+    store_id = current_user.store_id or 1
+    result = sale_service.return_trade(
+        db, params,
+        store_id=store_id,
+        operator_id=current_user.user_id,
+        operator_name=current_user.real_name,
+    )
+    return success(result.model_dump(mode="json"))
+
+
+# ---------- 4. GET /sales/trades ----------
+
+
+@router.get(
+    "/trades",
+    summary="销售单列表",
+)
+def list_trades(
+    db: DbSession,
+    current_user: Annotated[UserContext, Depends(require_perm(Perm.POS_USE))],
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    keyword: Annotated[str | None, Query()] = None,
+    start_date: Annotated[str | None, Query()] = None,
+    end_date: Annotated[str | None, Query()] = None,
+    status: Annotated[str | None, Query()] = None,
+) -> dict[str, Any]:
+    """GET /sales/trades —— 分页查询销售单。"""
+    store_filter = resolve_store_filter(current_user)
+    items, total = sale_service.list_trades(
+        db,
+        page=page,
+        page_size=page_size,
+        keyword=keyword,
+        start_date=start_date,
+        end_date=end_date,
+        status=status,
+        store_id=store_filter,
+    )
+    return success({
+        "list": [it.model_dump(mode="json") for it in items],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    })
+
+
+# ---------- 5. GET /sales/trades/{trade_id} ----------
+
+
+@router.get(
+    "/trades/{trade_id}",
+    summary="销售单详情",
+)
+def get_trade_detail(
+    trade_id: int,
+    db: DbSession,
+    _: Annotated[Any, Depends(require_perm(Perm.POS_USE))],
+) -> dict[str, Any]:
+    """GET /sales/trades/{id} —— 详情（含 items + payments）。"""
+    result = sale_service.get_trade_detail(db, trade_id)
+    return success(result.model_dump(mode="json"))
+
+
+# ---------- 7. POST /sales/trades/{trade_id}/void ----------
+
+
+@router.post(
+    "/trades/{trade_id}/void",
+    summary="作废销售单",
+)
+def void_trade(
+    trade_id: int,
+    params: VoidTradeRequest,
+    db: DbSession,
+    current_user: Annotated[UserContext, Depends(require_perm(Perm.POS_USE))],
+) -> dict[str, Any]:
+    """POST /sales/trades/{id}/void —— 作废。"""
+    store_id = current_user.store_id or 1
+    sale_service.void_trade(
+        db, trade_id, params,
+        store_id=store_id,
+        operator_id=current_user.user_id,
+    )
+    return success(None)
+
+
+# ---------- 12. POST /sales/trades/{trade_id}/receipt ----------
+
+
+@router.post(
+    "/trades/{trade_id}/receipt",
+    summary="获取小票",
+)
+def get_receipt(
+    trade_id: int,
+    db: DbSession,
+    _: Annotated[Any, Depends(require_perm(Perm.POS_USE))],
+) -> dict[str, Any]:
+    """POST /sales/trades/{id}/receipt —— 小票（print_count +1）。"""
+    result = sale_service.generate_receipt(db, trade_id)
+    return success(result.model_dump(mode="json"))
+
+
+# ---------- 8. POST /sales/holds ----------
+
+
+@router.post(
+    "/holds",
+    summary="挂单",
+)
+def create_hold(
+    params: HoldCreateRequest,
+    db: DbSession,
+    current_user: Annotated[UserContext, Depends(require_perm(Perm.POS_USE))],
+) -> dict[str, Any]:
+    """POST /sales/holds —— 挂单。"""
+    hold_no = sale_service.create_hold(
+        db,
+        pos_id=params.pos_id,
+        store_id=current_user.store_id or 1,
+        member_id=params.member_id,
+        cart_json=params.cart_json,
+        item_count=params.item_count,
+        amount=params.amount,
+        operator_id=current_user.user_id,
+    )
+    return success({"hold_no": hold_no})
+
+
+# ---------- 9. GET /sales/holds ----------
+
+
+@router.get(
+    "/holds",
+    summary="挂单列表",
+)
+def list_holds(
+    db: DbSession,
+    current_user: Annotated[UserContext, Depends(require_perm(Perm.POS_USE))],
+    pos_id: Annotated[int, Query()] = 1,
+) -> dict[str, Any]:
+    """GET /sales/holds —— 只返回 status='HOLDING' 的挂单。"""
+    holds = sale_service.list_holds(db, pos_id, current_user.store_id)
+    items = [
+        HoldOut(
+            id=h.id,
+            hold_no=h.hold_no,
+            store_id=h.store_id,
+            pos_id=h.pos_id,
+            member_id=h.member_id,
+            cart_json=(
+                h.cart_json if isinstance(h.cart_json, str)
+                else __import__("json").dumps(h.cart_json, ensure_ascii=False)
+            ),
+            item_count=h.item_count,
+            amount=h.amount,
+            status=h.status,
+            created_at=h.created_at,
+        ).model_dump(mode="json")
+        for h in holds
+    ]
+    return success(items)
+
+
+# ---------- 10. POST /sales/holds/{hold_no}/resume ----------
+
+
+@router.post(
+    "/holds/{hold_no}/resume",
+    summary="取单",
+)
+def resume_hold(
+    hold_no: str,
+    db: DbSession,
+    _: Annotated[Any, Depends(require_perm(Perm.POS_USE))],
+) -> dict[str, Any]:
+    """POST /sales/holds/{holdNo}/resume —— 取单（状态置 RESUMED）。"""
+    result = sale_service.resume_hold(db, hold_no)
+    return success(result)
+
+
+# ---------- 11. DELETE /sales/holds/{hold_no} ----------
+
+
+@router.delete(
+    "/holds/{hold_no}",
+    summary="取消挂单",
+)
+def cancel_hold(
+    hold_no: str,
+    db: DbSession,
+    _: Annotated[Any, Depends(require_perm(Perm.POS_USE))],
+) -> dict[str, Any]:
+    """DELETE /sales/holds/{holdNo} —— 软删除（置 CANCELED）。"""
+    sale_service.cancel_hold(db, hold_no)
+    return success(None)
+
+
+# ---------- 13. GET /sales/sessions/current ----------
+
+
+@router.get(
+    "/sessions/current",
+    summary="获取当前班次",
+    description="没有则自动开班（JB 取号，init_cash=0）。",
+)
+def get_current_session(
+    db: DbSession,
+    current_user: Annotated[UserContext, Depends(require_perm(Perm.POS_SESSION))],
+    pos_id: Annotated[int, Query()] = 1,
+) -> dict[str, Any]:
+    """GET /sales/sessions/current —— 当前班次（无则自动开班）。"""
+    result = sale_service.get_or_open_session(
+        db,
+        pos_id=pos_id,
+        store_id=current_user.store_id or 1,
+        cashier_id=current_user.user_id,
+    )
+    return success(result)
+
+
+# ---------- 14. POST /sales/sessions/close ----------
+
+
+@router.post(
+    "/sessions/close",
+    summary="交班",
+)
+def close_session(
+    params: SessionCloseRequest,
+    db: DbSession,
+    current_user: Annotated[UserContext, Depends(require_perm(Perm.POS_SESSION))],
+) -> dict[str, Any]:
+    """POST /sales/sessions/close —— 交班。"""
+    result = sale_service.close_session(
+        db, params, operator_id=current_user.user_id,
+    )
+    return success(result)

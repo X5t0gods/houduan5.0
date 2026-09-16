@@ -17,7 +17,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.schemas.base import BaseSchema, Flag, Money, Qty, Rate
+from app.schemas.base import BaseSchema, DateTimeStr, Flag, Money, Qty, Rate
 
 # ---------- Cart 相关（收银台） ----------
 
@@ -110,3 +110,236 @@ class CartCalcResult(BaseSchema):
     point_deduct: Money = Field(description="积分抵扣（calc 恒为 0）")
     receivable: Money = Field(description="应收（total - discount，>=0）")
     details: list[PromoDetailOut] = Field(default_factory=list, description="命中促销明细")
+
+
+# ---------- 结算与交易 ----------
+
+
+class TradePaymentIn(BaseModel):
+    """支付明细（结算请求）。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    pay_method: str = Field(description="支付方式 CASH/WECHAT/ALIPAY/CARD/BALANCE/POINTS/OTHER")
+    amount: Decimal = Field(ge=0, description="支付金额")
+    pay_no: str | None = Field(default=None, max_length=64, description="第三方支付流水号")
+
+
+class TradeCreateRequest(BaseModel):
+    """结算请求（POST /sales/trades）—— **幂等**。
+
+    ⚠️ request_id 由前端自动生成（request.ts:48 IDEMPOTENT_PATHS），
+       后端靠 sal_trade.uk_request_id 唯一索引兑住并发重复提交。
+    ⚠️ 请求体里 **没有** discount_amount / receivable 字段（spec 三 ④），
+       后端必须自己重算全部优惠（促销 + 会员折扣），绝不能信前端传的值。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    request_id: str = Field(min_length=1, max_length=64, description="幂等键（前端 UUID）")
+    pos_id: int = Field(description="收银台 ID")
+    session_id: int | None = Field(default=None, description="班次号 ID（可选）")
+    member_id: int | None = Field(default=None, description="会员 ID（非会员为空）")
+    items: list[CartItem] = Field(min_length=1, description="商品明细")
+    payments: list[TradePaymentIn] = Field(min_length=1, description="支付明细（混合支付）")
+    use_points: int | None = Field(default=0, ge=0, description="使用积分数（前端未接线，预期 0）")
+    round_amount: Decimal | None = Field(default=Decimal("0"), ge=0, description="抹零金额")
+    remark: str | None = Field(default=None, max_length=255)
+
+
+class TradeCreateResult(BaseSchema):
+    """结算响应（最小集，spec 6.3）。"""
+
+    id: int
+    trade_no: str
+    receivable: Money
+    received: Money
+    change_amount: Money
+    trade_time: DateTimeStr
+    item_count: int = Field(default=0, description="商品行数（额外方便前端）")
+
+
+class TradeItemOut(BaseSchema):
+    """销售单明细（对应前端 TradeItem）。"""
+
+    id: int
+    trade_id: int
+    product_id: int
+    product_name: str
+    spec: str | None = None
+    unit_name: str | None = None
+    quantity: Qty
+    unit_price: Money
+    origin_price: Money | None = None
+    cost_price: Rate  # ⚠️ DECIMAL(12,4) 用 Rate
+    discount_amount: Money
+    amount: Money
+    batch_id: int | None = None
+    promo_id: int | None = None
+    promo_type: str | None = None
+
+
+class TradePaymentOut(BaseSchema):
+    """销售支付明细（对应前端 TradePayment）。"""
+
+    pay_method: str
+    amount: Money
+    pay_no: str | None = None
+    pay_status: str | None = None
+
+
+class TradeOut(BaseSchema):
+    """销售单完整信息（对应前端 Trade）。"""
+
+    id: int
+    trade_no: str
+    request_id: str
+    store_id: int
+    pos_id: int
+    cashier_id: int
+    cashier_name: str | None = None
+    member_id: int | None = None
+    member_name: str | None = None
+    member_no: str | None = None
+    total_qty: Qty
+    total_amount: Money
+    discount_amount: Money
+    point_deduct: Money
+    receivable: Money
+    received: Money
+    change_amount: Money
+    cost_amount: Money
+    gross_profit: Money
+    round_amount: Money
+    status: str
+    trade_time: DateTimeStr
+    items: list[TradeItemOut] | None = None
+    payments: list[TradePaymentOut] | None = None
+
+
+# ---------- 退货 ----------
+
+
+class SaleReturnItemIn(BaseModel):
+    """退货明细项。"""
+
+    product_id: int
+    quantity: Decimal = Field(gt=0)
+
+
+class SaleReturnCreateRequest(BaseModel):
+    """退货请求（POST /sales/trades/return）。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    source_trade_id: int
+    items: list[SaleReturnItemIn] = Field(min_length=1)
+    refund_method: str = Field(description="退款方式 CASH/WECHAT/ALIPAY/CARD/BALANCE")
+    reason: str = Field(min_length=1, max_length=255)
+
+
+class SaleReturnOut(BaseSchema):
+    """退货单响应（对应前端 SaleReturn）。"""
+
+    id: int
+    return_no: str
+    source_trade_id: int
+    source_trade_no: str | None = None
+    store_id: int
+    member_id: int | None = None
+    total_amount: Money
+    cost_amount: Money
+    refund_method: str
+    refund_status: str
+    reason: str | None = None
+    operator_name: str | None = None
+    created_at: DateTimeStr
+
+
+class VoidTradeRequest(BaseModel):
+    """作废请求（POST /sales/trades/{id}/void）。"""
+
+    reason: str = Field(min_length=1, max_length=255)
+
+
+class ReceiptResult(BaseSchema):
+    """小票打印响应。"""
+
+    print_data: str = Field(description="纯文本小票（等宽字体排版）")
+    print_count: int = Field(description="累计打印次数")
+
+
+# ---------- 挂单 ----------
+
+
+class HoldCreateRequest(BaseModel):
+    """挂单请求。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    pos_id: int
+    member_id: int | None = None
+    cart_json: str = Field(description="购物车快照 JSON 字符串")
+    item_count: int = Field(ge=0)
+    amount: Decimal = Field(ge=0)
+
+
+class HoldCreateResult(BaseSchema):
+    hold_no: str
+
+
+class HoldOut(BaseSchema):
+    """挂单详情。"""
+
+    id: int
+    hold_no: str
+    store_id: int
+    pos_id: int
+    member_id: int | None = None
+    cart_json: str
+    item_count: int
+    amount: Money
+    status: str
+    created_at: DateTimeStr
+
+
+# ---------- 班次 ----------
+
+
+class SaleSessionOut(BaseSchema):
+    """班次响应（对应前端 SaleSession）。"""
+
+    id: int
+    session_no: str
+    store_id: int
+    pos_id: int
+    pos_name: str | None = None
+    cashier_id: int
+    cashier_name: str | None = None
+    open_time: DateTimeStr
+    close_time: DateTimeStr | None = None
+    init_cash: Money
+    sale_amount: Money
+    sale_count: int
+    return_amount: Money
+    void_amount: Money
+    cash_amount: Money
+    wechat_amount: Money
+    alipay_amount: Money
+    card_amount: Money
+    balance_amount: Money
+    actual_cash: Money | None = None
+    # ⚠️ spec 三 ⑧：字段名是 cash_diff，不是 Mock 里的 diff_amount
+    cash_diff: Money | None = None
+    diff_remark: str | None = None
+    status: str
+
+
+class SessionCloseRequest(BaseModel):
+    """交班请求。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    session_id: int
+    actual_cash: Decimal = Field(ge=0)
+    diff_remark: str | None = Field(default=None, max_length=255)
