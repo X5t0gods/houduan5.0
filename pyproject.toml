@@ -20,6 +20,9 @@ dependencies = [
     # ⚠️ 不用 python-jose（依赖重、维护少）也不用 passlib（与 bcrypt>=4.0 不相容）
     "PyJWT>=2.9.0",
     "Pillow>=10.4.0",
+    # 阶段 3 商品导入 Excel（仅 .xlsx）
+    # ⚠️ 不装 pandas（阶段 9 BI 才需），也不装 xlrd（不支持 xlsx）
+    "openpyxl>=3.1.0",
     # Windows 上 ZoneInfo("Asia/Shanghai") 必须依赖 tzdata 提供的时区数据库；
     # Linux/Mac 有系统 tz 库，装了也无害，统一依赖避免平台差异
     "tzdata>=2024.1",
@@ -46,6 +49,8 @@ ignore = ["B008"]  # FastAPI Depends() 在默认参数中使用是惯用写法
 # SQLAlchemy 声明式模型：一行写完一个字段更可读（包含 mapped_column + 类型 + 约束 + comment），
 # 强制拆行反而降低信息密度。社区惯例（包括 FastAPI 官方全栈模板）均对 models/ 目录宽容 E501。
 "app/models/*.py" = ["E501"]
+# Pydantic Schema 中文 description + Field(ge=/le=/max_length=) 多参数时自然很长，同理豁免
+"app/schemas/product.py" = ["E501"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["app"]

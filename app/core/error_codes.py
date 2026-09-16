@@ -40,6 +40,13 @@ class ErrorCode(IntEnum):
     REQUIRED_MISSING = 2001
     PRODUCT_DUPLICATE = 2002
     PRICE_BELOW_COST = 2003
+    # 阶段 3 新增：商品/分类业务错误（docs/06 1.4 节未定义，本阶段补充；
+    # 前端 request.ts:96 有 `ERROR_MESSAGE[res.code] ?? res.message ?? '操作失败'` fallback，
+    # 新增码安全但必须后端返回中文 message）
+    PRODUCT_NOT_FOUND = 2004              # 商品不存在
+    CATEGORY_INVALID = 2005               # 分类不存在或操作非法（包含层级超限、环引用、有子分类）
+    CATEGORY_REFERENCED = 2006            # 分类被商品引用，只能停用不可删除
+    PRODUCT_HAS_BUSINESS_FLOW = 2007      # 商品已产生业务流水，不可删除
 
     # ---------- 供应商 (3xxx) ----------
     SUPPLIER_DISABLED = 3001
@@ -89,6 +96,12 @@ ERROR_MESSAGES: dict[int, str] = {
     ErrorCode.REQUIRED_MISSING: "必填项缺失",
     ErrorCode.PRODUCT_DUPLICATE: "商品编码或条码已存在",
     ErrorCode.PRICE_BELOW_COST: "售价低于进价，请确认后重试",
+    # 阶段 3 新增的 4 个码的默认文案（具体调用时可传定制 message 覆盖，
+    # 如 CATEGORY_REFERENCED 需带上实际引用数）
+    ErrorCode.PRODUCT_NOT_FOUND: "商品不存在",
+    ErrorCode.CATEGORY_INVALID: "分类不存在或操作非法",
+    ErrorCode.CATEGORY_REFERENCED: "该分类已被商品引用，只能停用不可删除",
+    ErrorCode.PRODUCT_HAS_BUSINESS_FLOW: "该商品已产生业务流水，不可删除",
     ErrorCode.SUPPLIER_DISABLED: "供应商已停用",
     ErrorCode.ORDER_STATUS_INVALID: "当前单据状态不允许收货",
     ErrorCode.RECEIVE_QTY_EXCEED: "收货数量超出订单剩余数量",
