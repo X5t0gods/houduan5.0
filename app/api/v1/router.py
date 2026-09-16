@@ -13,6 +13,7 @@ from app.api.v1.health import router as health_router
 from app.api.v1.inventory import router as inventory_router
 from app.api.v1.member import router as member_router
 from app.api.v1.product import router as product_router
+from app.api.v1.promotion import router as promotion_router
 from app.api.v1.purchase import router as purchase_router
 from app.api.v1.sale import router as sale_router
 from app.api.v1.supplier import router as supplier_router
@@ -40,9 +41,9 @@ api_router.include_router(supplier_router)
 api_router.include_router(purchase_router)
 # 阶段 7：会员与促销
 api_router.include_router(member_router)
+api_router.include_router(promotion_router)
 
 # ---------- 后续阶段挂载（占位注释） ----------
-# api_router.include_router(promotion_router, prefix="/promotions", tags=["促销管理"])
 # api_router.include_router(report_router, prefix="/reports", tags=["统计报表"])
 # api_router.include_router(bi_router, prefix="/bi", tags=["智能数据分析"])
 # api_router.include_router(system_router, prefix="/system", tags=["系统管理"])

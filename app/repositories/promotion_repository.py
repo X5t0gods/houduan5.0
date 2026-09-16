@@ -191,3 +191,96 @@ def increment_promotion_stats(
         )
     )
     session.flush()
+
+
+# ---------- 阶段 7：促销 CRUD ----------
+
+
+def list_promotions(
+    session: Session,
+    *,
+    page: int,
+    page_size: int,
+    keyword: str | None = None,
+    status: str | None = None,
+) -> tuple[list[tuple], int]:
+    """分页查询促销，返回 ([(ProPromotion, created_by_name), ...], total)。"""
+    from sqlalchemy import func
+    from sqlalchemy import select as sa_select
+
+    from app.models.sys_models import SysUser
+
+    stmt = (
+        sa_select(ProPromotion, SysUser.real_name.label("created_by_name"))
+        .outerjoin(SysUser, SysUser.id == ProPromotion.created_by)
+    )
+    conditions = []
+    if keyword:
+        conditions.append(ProPromotion.promo_name.like(f"%{keyword.strip()}%"))
+    if status:
+        conditions.append(ProPromotion.status == status)
+    if conditions:
+        stmt = stmt.where(*conditions)
+
+    total = session.execute(
+        sa_select(func.count()).select_from(stmt.subquery())
+    ).scalar_one()
+    stmt = stmt.order_by(ProPromotion.id.desc()).offset((page - 1) * page_size).limit(page_size)
+    return list(session.execute(stmt).all()), int(total)
+
+
+def get_promotion_by_id(session: Session, promo_id: int) -> ProPromotion | None:
+    from sqlalchemy import select as sa_select
+
+    return session.execute(
+        sa_select(ProPromotion).where(ProPromotion.id == promo_id)
+    ).scalar_one_or_none()
+
+
+def insert_promotion(session: Session, **fields) -> ProPromotion:
+    p = ProPromotion(**fields)
+    session.add(p)
+    session.flush()
+    return p
+
+
+def update_promotion(session: Session, promo_id: int, values: dict) -> None:
+    from sqlalchemy import update
+
+    if not values:
+        return
+    session.execute(update(ProPromotion).where(ProPromotion.id == promo_id).values(**values))
+    session.flush()
+
+
+def delete_promotion(session: Session, promo_id: int) -> None:
+    """删促销（先删明细再删主表，外键 RESTRICT）。"""
+    from sqlalchemy import delete
+
+    session.execute(delete(ProPromotionItem).where(ProPromotionItem.promo_id == promo_id))
+    session.execute(delete(ProPromotion).where(ProPromotion.id == promo_id))
+    session.flush()
+
+
+def list_promotion_items(session: Session, promo_id: int) -> list[ProPromotionItem]:
+    from sqlalchemy import select as sa_select
+
+    return list(session.execute(
+        sa_select(ProPromotionItem).where(ProPromotionItem.promo_id == promo_id)
+        .order_by(ProPromotionItem.id)
+    ).scalars().all())
+
+
+def insert_promotion_items_batch(session: Session, items: list[dict]) -> None:
+    """批量插入促销明细（一次 add_all + flush）。"""
+    objs = [ProPromotionItem(**it) for it in items]
+    session.add_all(objs)
+    session.flush()
+
+
+def delete_promotion_items(session: Session, promo_id: int) -> None:
+    """删除促销全部明细（修改时全量替换用，spec 5.18）。"""
+    from sqlalchemy import delete
+
+    session.execute(delete(ProPromotionItem).where(ProPromotionItem.promo_id == promo_id))
+    session.flush()
