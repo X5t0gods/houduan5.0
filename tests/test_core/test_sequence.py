@@ -89,10 +89,16 @@ class TestSequenceGeneration:
         db_session.rollback()
 
     def test_supplier_code_format(self, db_session: Session) -> None:
-        """S 键：S + 6 位流水。"""
-        self._clean_seq(db_session)
+        """S 键：S + 6 位流水。
+
+        ⚠️ S 是全局键，实际值取决于 DB 状态（阶段 6 init_supplier_seq 已对齐到
+        现有供应商最大编码 5），本测试只断言格式与递增，不断言绝对值。
+        """
         seq = NoSeqService(db_session)
-        assert seq.next_no("S", at=date(2026, 9, 15)) == "S000001"
+        no = seq.next_no("S", at=date(2026, 9, 15))
+        assert re.fullmatch(r"S\d{6}", no), f"S 单号格式错：{no}"
+        no2 = seq.next_no("S", at=date(2026, 9, 15))
+        assert int(no2[1:]) == int(no[1:]) + 1
         db_session.rollback()
 
     def test_member_no_format(self, db_session: Session) -> None:

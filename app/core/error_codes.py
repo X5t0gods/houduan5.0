@@ -54,6 +54,12 @@ class ErrorCode(IntEnum):
     # ---------- 采购 (4xxx) ----------
     ORDER_STATUS_INVALID = 4001
     RECEIVE_QTY_EXCEED = 4002
+    # 阶段 6 新增（沿用阶段 3 做法：docs/06 1.4 节未定义，前端 request.ts:96
+    # 有 `ERROR_MESSAGE[code] ?? res.message ?? '操作失败'` fallback，新增码安全
+    # 但后端必须返回中文 message）
+    PURCHASE_ORDER_NOT_FOUND = 4003       # 采购订单不存在
+    PURCHASE_STATUS_FORBID = 4004         # 该状态下不允许此操作
+    SUPPLIER_NOT_FOUND = 4005             # 供应商不存在或已停用
 
     # ---------- 库存 (5xxx) ----------
     CHECK_DIFF_REASON_MISSING = 5001
@@ -105,6 +111,10 @@ ERROR_MESSAGES: dict[int, str] = {
     ErrorCode.SUPPLIER_DISABLED: "供应商已停用",
     ErrorCode.ORDER_STATUS_INVALID: "当前单据状态不允许收货",
     ErrorCode.RECEIVE_QTY_EXCEED: "收货数量超出订单剩余数量",
+    # 阶段 6 新增 3 个码的默认文案（调用时可传定制 message 覆盖）
+    ErrorCode.PURCHASE_ORDER_NOT_FOUND: "采购订单不存在",
+    ErrorCode.PURCHASE_STATUS_FORBID: "该状态下不允许此操作",
+    ErrorCode.SUPPLIER_NOT_FOUND: "供应商不存在或已停用",
     ErrorCode.CHECK_DIFF_REASON_MISSING: "盘点差异未填写原因",
     ErrorCode.DOC_ALREADY_AUDITED: "单据已审核，无法重复操作",
     ErrorCode.BARCODE_NOT_FOUND: "未找到该条码对应的商品",
