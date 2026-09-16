@@ -51,6 +51,7 @@ ignore = ["B008"]  # FastAPI Depends() 在默认参数中使用是惯用写法
 "app/models/*.py" = ["E501"]
 # Pydantic Schema 中文 description + Field(ge=/le=/max_length=) 多参数时自然很长，同理豁免
 "app/schemas/product.py" = ["E501"]
+"app/schemas/sale.py" = ["E501"]
 # 测试文件：包含大量中文断言消息、测试数据字面量（如 Excel 行），自然很长，拆行反而失可读性
 "tests/**/*.py" = ["E501"]
 
