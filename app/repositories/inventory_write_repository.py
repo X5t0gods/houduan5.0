@@ -127,6 +127,50 @@ def restore_stock(
     return before_qty, before_qty + quantity, avg_cost
 
 
+def upsert_stock_add(
+    session: Session,
+    *,
+    store_id: int,
+    product_id: int,
+    quantity: Decimal,
+    avg_cost: Decimal,
+) -> tuple[Decimal, Decimal]:
+    """调入门店库存 upsert（不存在则新建，存在则累加）——调拨入库专用（spec 5.10）。
+
+    ⚠️ 新建时 safe_qty 默认 0（spec 5.10）；avg_cost 用调出方的成本。
+    ⚠️ 已存在时只累加 quantity，**不改 avg_cost**（本阶段不做移动加权成本重算，阶段 7）。
+
+    Returns:
+        (before_qty, after_qty) 元组，供写流水用。
+    """
+    stock = get_stock(session, store_id, product_id)
+    if stock is None:
+        # 新建库存记录
+        before_qty = Decimal("0")
+        session.add(InvStock(
+            store_id=store_id,
+            product_id=product_id,
+            quantity=quantity,
+            safe_qty=Decimal("0"),
+            max_qty=None,
+            avg_cost=avg_cost,
+        ))
+        session.flush()
+        return before_qty, quantity
+
+    before_qty = stock.quantity
+    session.execute(
+        update(InvStock)
+        .where(
+            InvStock.store_id == store_id,
+            InvStock.product_id == product_id,
+        )
+        .values(quantity=InvStock.quantity + quantity)
+    )
+    session.flush()
+    return before_qty, before_qty + quantity
+
+
 def write_stock_flow(
     session: Session,
     *,

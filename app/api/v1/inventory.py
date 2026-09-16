@@ -36,8 +36,10 @@ from app.schemas.inventory import (
     CheckAuditRequest,
     CheckCreateRequest,
     CheckItemsUpdateRequest,
+    LossCreateRequest,
+    TransferCreateRequest,
 )
-from app.services import check_service, inventory_service
+from app.services import check_service, inventory_service, loss_service, transfer_service
 
 router = APIRouter(prefix="/inventory", tags=["库存管理"])
 
@@ -305,3 +307,104 @@ def audit_check(
     """POST /inventory/checks/{id}/audit —— 审核盘点。"""
     check_service.audit_check(db, check_id, params, auditor_id=current_user.user_id)
     return success(None)
+
+
+# ---------- 11. GET /inventory/losses ----------
+
+
+@router.get(
+    "/losses",
+    summary="报损单列表",
+)
+def list_losses(
+    db: DbSession,
+    current_user: Annotated[UserContext, Depends(require_perm(Perm.INV_LOSS))],
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    status: Annotated[str | None, Query()] = None,
+) -> dict[str, Any]:
+    """GET /inventory/losses —— 报损单列表（含 created_by_name + item_count）。"""
+    store_filter = resolve_store_filter(current_user)
+    items, total = loss_service.list_losses(
+        db, page=page, page_size=page_size, status=status, store_id=store_filter,
+    )
+    return success({
+        "list": [it.model_dump(mode="json") for it in items],
+        "total": total, "page": page, "page_size": page_size,
+    })
+
+
+# ---------- 12. POST /inventory/losses ----------
+
+
+@router.post(
+    "/losses",
+    summary="报损登记（创建即生效）",
+    description=(
+        "⛔ 请求体是 **items 数组**（spec 冲突表 ②）；\n"
+        "loss_type 用短名 BREAK/EXPIRE/FRESH/OTHER。\n\n"
+        "⚠️ 创建即扣库存 + 写 LOSS_OUT 流水 + status=FINISHED（无审核环节，spec 冲突表 ⑥）；\n"
+        "unit_cost 以 inv_stock.avg_cost 为准（不信前端传值）"
+    ),
+)
+def create_loss(
+    params: LossCreateRequest,
+    db: DbSession,
+    current_user: Annotated[UserContext, Depends(require_perm(Perm.INV_LOSS))],
+) -> dict[str, Any]:
+    """POST /inventory/losses —— 报损登记。"""
+    store_id = current_user.store_id or 1
+    result = loss_service.create_loss(
+        db, params, store_id=store_id, user_id=current_user.user_id,
+    )
+    return success(result.model_dump(mode="json"))
+
+
+# ---------- 13. GET /inventory/transfers ----------
+
+
+@router.get(
+    "/transfers",
+    summary="调拨单列表",
+)
+def list_transfers(
+    db: DbSession,
+    current_user: Annotated[UserContext, Depends(require_perm(Perm.INV_TRANSFER))],
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    status: Annotated[str | None, Query()] = None,
+) -> dict[str, Any]:
+    """GET /inventory/transfers —— 调拨单列表（含 from_store/to_store 门店名 + item_count）。"""
+    store_filter = resolve_store_filter(current_user)
+    items, total = transfer_service.list_transfers(
+        db, page=page, page_size=page_size, status=status, store_id=store_filter,
+    )
+    return success({
+        "list": [it.model_dump(mode="json") for it in items],
+        "total": total, "page": page, "page_size": page_size,
+    })
+
+
+# ---------- 14. POST /inventory/transfers ----------
+
+
+@router.post(
+    "/transfers",
+    summary="调拨申请（一步到位）",
+    description=(
+        "⛔ 请求体是 **items 数组**（spec 冲突表 ②）。\n\n"
+        "⚠️ 创建即完成调出+调入（spec 冲突表 ⑤ 补充设计）：\n"
+        "调出门店扣库存写 TRANSFER_OUT、调入门店 upsert 写 TRANSFER_IN，status=IN。\n"
+        "校验：from≠to、2001；门店不存在/停业、2001；调出库存不足、6003"
+    ),
+)
+def create_transfer(
+    params: TransferCreateRequest,
+    db: DbSession,
+    current_user: Annotated[UserContext, Depends(require_perm(Perm.INV_TRANSFER))],
+) -> dict[str, Any]:
+    """POST /inventory/transfers —— 调拨申请。"""
+    result = transfer_service.create_transfer(
+        db, params, user_id=current_user.user_id,
+    )
+    return success(result.model_dump(mode="json"))
