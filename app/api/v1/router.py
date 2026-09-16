@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends
 from app.api.v1.auth import router as auth_router
 from app.api.v1.category import router as category_router
 from app.api.v1.health import router as health_router
+from app.api.v1.product import router as product_router
 from app.api.v1.unit import router as unit_router
 from app.core.config import settings
 from app.core.response import success
@@ -22,11 +23,11 @@ api_router = APIRouter()
 api_router.include_router(health_router)
 api_router.include_router(auth_router)
 # 阶段 3：商品基础数据
+api_router.include_router(product_router)
 api_router.include_router(category_router)
 api_router.include_router(unit_router)
 
 # ---------- 后续阶段挂载（占位注释） ----------
-# api_router.include_router(product_router, prefix="/products", tags=["商品管理"])
 # api_router.include_router(inventory_router, prefix="/inventory", tags=["库存管理"])
 # api_router.include_router(purchase_router, prefix="/purchases", tags=["采购与供应商"])
 # api_router.include_router(sale_router, prefix="/sales", tags=["销售与收银"])

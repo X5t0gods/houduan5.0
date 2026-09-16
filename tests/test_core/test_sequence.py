@@ -64,17 +64,27 @@ class TestSequenceGeneration:
     """集成测试：真实数据库上的取号行为。"""
 
     def _clean_seq(self, session: Session) -> None:
-        """清空 sys_no_seq 表，保证测试独立。"""
-        session.execute(text("DELETE FROM sys_no_seq"))
+        """清理测试用的 seq 键，保证测试独立。
+
+        ⚠️ 不能全量 DELETE FROM sys_no_seq！那会把全局键 P/S 也清掉，
+        导致商品建档取号从 P000001 重新开始撑 DB 里已有的 P000001-P000025 唯一索引。
+        只删除本测试会用的 daily 键（XS / BATCH:* 等），保留全局键 P/S。
+        """
+        session.execute(text("DELETE FROM sys_no_seq WHERE seq_key NOT IN ('P', 'S')"))
         session.commit()
 
     def test_product_code_format(self, db_session: Session) -> None:
-        """P 键：P + 6 位流水（如 P000001）。"""
-        self._clean_seq(db_session)
+        """P 键：P + 6 位流水（如 P000001）。
+
+        ⚠️ P 是全局键，实际值取决于 DB 状态（阶段 3 已对齐到现有商品最大编码），
+        本测试只断言格式与递增，不断言绝对值。
+        """
         seq = NoSeqService(db_session)
         no = seq.next_no("P", at=date(2026, 9, 15))
         assert re.fullmatch(r"P\d{6}", no), f"P 单号格式错：{no}"
-        assert no == "P000001"
+        no2 = seq.next_no("P", at=date(2026, 9, 15))
+        # 递增：后一个流水号 = 前一个 + 1
+        assert int(no2[1:]) == int(no[1:]) + 1
         db_session.rollback()
 
     def test_supplier_code_format(self, db_session: Session) -> None:
@@ -135,14 +145,23 @@ class TestSequenceGeneration:
         db_session.rollback()
 
     def test_cross_day_global_key_continues(self, db_session: Session) -> None:
-        """跨日：全局 key（P/S）继续递增，不重置。"""
-        self._clean_seq(db_session)
+        """跨日：全局 key（P/S）继续递增，不重置。
+
+        ⚠️ P/S 是全局键，不断言绝对值，只断言递增关系与跨日不重置行为。
+        """
         seq = NoSeqService(db_session)
         d1, d2 = date(2026, 9, 15), date(2026, 9, 16)
-        assert seq.next_no("P", at=d1) == "P000001"
-        assert seq.next_no("P", at=d2) == "P000002"  # 跨日不重置
-        assert seq.next_no("P", at=d1) == "P000003"
-        assert seq.next_no("S", at=d2) == "S000001"  # 不同 key 独立
+        p1 = seq.next_no("P", at=d1)
+        p2 = seq.next_no("P", at=d2)  # 跨日不重置
+        p3 = seq.next_no("P", at=d1)
+        # 递增关系（不看绝对值）
+        assert int(p1[1:]) + 1 == int(p2[1:])
+        assert int(p2[1:]) + 1 == int(p3[1:])
+        # 不同 key 独立：S 键单独计数
+        s1 = seq.next_no("S", at=d2)
+        s2 = seq.next_no("S", at=d1)
+        assert s1.startswith("S") and s2.startswith("S")
+        assert int(s1[1:]) + 1 == int(s2[1:])
         db_session.rollback()
 
     def test_batch_isolates_by_product_code(self, db_session: Session) -> None:
