@@ -28,11 +28,14 @@ from app.core.response import success
 from app.deps import DbSession, UserContext, require_perm, resolve_store_filter
 from app.schemas.purchase import (
     AuditRequest,
+    DirectReceiveParams,
     PurchaseOrderCreate,
     PurchaseOrderUpdate,
+    PurchaseReturnParams,
+    ReceiveParams,
     VoidRequest,
 )
-from app.services import purchase_service
+from app.services import purchase_service, receipt_service
 
 router = APIRouter(prefix="/purchases", tags=["采购管理"])
 
@@ -83,6 +86,56 @@ def list_orders(
         "list": [it.model_dump(mode="json") for it in items],
         "total": total, "page": page, "page_size": page_size,
     })
+
+
+# ---------- 8. POST /purchases/direct-receive ----------
+# ⚠️ 必须在 /purchases/{order_id} 之前声明，否则 "direct-receive" 被当作 order_id 解析
+
+
+@router.post(
+    "/direct-receive",
+    summary="无单快速入库",
+    description=(
+        "建单+收货+入库一体（spec 4.3）：订单直接 FINISHED、is_direct=1、order_id 关联。\n\n"
+        "⚠️ 数量字段是 **quantity**（不是 receive_qty）；供应商停用→3001"
+    ),
+)
+def direct_receive(
+    params: DirectReceiveParams,
+    db: DbSession,
+    current_user: Annotated[UserContext, Depends(require_perm(Perm.PUR_RECEIPT))],
+) -> dict[str, Any]:
+    """POST /purchases/direct-receive —— 无单快速入库。"""
+    store_id = current_user.store_id or 1
+    result = receipt_service.direct_receive(
+        db, params, store_id=store_id, operator_id=current_user.user_id,
+    )
+    return success(result.model_dump(mode="json"))
+
+
+# ---------- 9. POST /purchases/returns ----------
+# ⚠️ 同样必须在 /purchases/{order_id} 之前
+
+
+@router.post(
+    "/returns",
+    summary="采购退货",
+    description=(
+        "创建即生效（spec 冲突表⑧）：扣库存(PURCHASE_RETURN_OUT)+冲减应付（允许负）。\n\n"
+        "⛔ 不重算 avg_cost；unit_price 缺失取 prd_product.purchase_price"
+    ),
+)
+def create_return(
+    params: PurchaseReturnParams,
+    db: DbSession,
+    current_user: Annotated[UserContext, Depends(require_perm(Perm.PUR_RECEIPT))],
+) -> dict[str, Any]:
+    """POST /purchases/returns —— 采购退货。"""
+    store_id = current_user.store_id or 1
+    result = receipt_service.create_return(
+        db, params, store_id=store_id, operator_id=current_user.user_id,
+    )
+    return success(result.model_dump(mode="json"))
 
 
 # ---------- 2. GET /purchases/{order_id} ----------
@@ -156,3 +209,28 @@ def void_order(
     """POST /purchases/{id}/void —— 作废。"""
     purchase_service.void_order(db, order_id, params, operator_id=current_user.user_id)
     return success(None)
+
+
+# ---------- 7. POST /purchases/{order_id}/receive ----------
+
+
+@router.post(
+    "/{order_id}/receive",
+    summary="收货入库（事务 T2 + MAVG 成本重算）",
+    description=(
+        "**本阶段核心**：校验超收(4002)/状态(4001) → 写收货单+明细 → 累加received_qty\n"
+        "→ 库存入库+MAVG重算avg_cost → PURCHASE_IN流水 → 保质期商品建批次 → 应付增加。\n\n"
+        "⚠️ 批次只给 prd_product.is_perishable=1 的商品建（⛔不信前端 idx%3 假值）"
+    ),
+)
+def receive_order(
+    order_id: int,
+    params: ReceiveParams,
+    db: DbSession,
+    current_user: Annotated[UserContext, Depends(require_perm(Perm.PUR_RECEIPT))],
+) -> dict[str, Any]:
+    """POST /purchases/{id}/receive —— 收货入库。"""
+    result = receipt_service.receive_order(
+        db, order_id, params, operator_id=current_user.user_id,
+    )
+    return success(result.model_dump(mode="json"))

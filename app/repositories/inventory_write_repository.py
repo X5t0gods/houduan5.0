@@ -171,6 +171,55 @@ def upsert_stock_add(
     return before_qty, before_qty + quantity
 
 
+def receive_stock(
+    session: Session,
+    *,
+    store_id: int,
+    product_id: int,
+    add_qty: Decimal,
+    new_avg_cost: Decimal,
+) -> tuple[Decimal, Decimal]:
+    """采购入库：quantity += add_qty 且 **设置新 avg_cost**（MAVG 重算结果）。
+
+    ⚠️ 与 upsert_stock_add 的区别：后者不改 avg_cost（调拨用），
+       本函数专用于采购收货，avg_cost 由调用方（receipt_service）用
+       costing_service.calc_weighted_avg_cost 算好后传入（分层：算在 service，写在 repo）。
+
+    ⚠️ 无记录则新建（quantity=add_qty, avg_cost=new_avg_cost, safe_qty=0）。
+
+    Returns:
+        (before_qty, after_qty) 元组，供写流水用。
+    """
+    stock = get_stock(session, store_id, product_id)
+    if stock is None:
+        # 新建库存记录（该门店首次入库）
+        session.add(InvStock(
+            store_id=store_id,
+            product_id=product_id,
+            quantity=add_qty,
+            safe_qty=Decimal("0"),
+            max_qty=None,
+            avg_cost=new_avg_cost,
+        ))
+        session.flush()
+        return Decimal("0"), add_qty
+
+    before_qty = stock.quantity
+    session.execute(
+        update(InvStock)
+        .where(
+            InvStock.store_id == store_id,
+            InvStock.product_id == product_id,
+        )
+        .values(
+            quantity=InvStock.quantity + add_qty,
+            avg_cost=new_avg_cost,  # ⚠️ MAVG 重算后的新成本
+        )
+    )
+    session.flush()
+    return before_qty, before_qty + add_qty
+
+
 def write_stock_flow(
     session: Session,
     *,
