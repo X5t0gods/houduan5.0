@@ -26,14 +26,15 @@ class TestKeySpecs:
     """静态测试：编号规则表本身。"""
 
     def test_16_keys_defined(self) -> None:
-        """KEY_SPECS 必须恰好定义 16 类单号（含 P/S/M/BATCH + 12 单据类）。"""
+        """KEY_SPECS 定义 17 类单号（P/S/M/BATCH + 12 单据类 + 阶段5新增 QC 期初库存）。"""
         expected_keys = {
             "P", "S", "M", "BATCH",
             "CG", "SH", "CT", "FK",
             "XS", "TH", "PD", "BS", "DB", "JB", "CZ", "GD",
+            "QC",  # 阶段 5 新增：期初库存单号 QC+yyyyMMdd+3 位
         }
         assert set(KEY_SPECS.keys()) == expected_keys
-        assert len(KEY_SPECS) == 16
+        assert len(KEY_SPECS) == 17
 
     def test_global_keys_are_p_and_s(self) -> None:
         """只有 P 和 S 是全局键（跨日不重置），其余按日。"""

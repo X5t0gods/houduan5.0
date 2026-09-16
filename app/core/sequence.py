@@ -85,6 +85,9 @@ KEY_SPECS: Final[dict[str, KeySpec]] = {
     # ⚠️ GD（挂单号）文档与脚本都未规定格式，本次补充定义为 GD+yyyyMMdd+4 位
     # （与其余单据保持一致），**待确认**
     "GD": KeySpec(prefix="GD", width=4, daily=True),  # 挂单号
+    # ⚠️ QC（期初库存单号）阶段 5 新增：db/02_init_data.sql 的 inv_stock_flow.source_no
+    # 用 QC20260915001（QC + yyyyMMdd + 3 位），补商品建档期初库存时对齐此格式
+    "QC": KeySpec(prefix="QC", width=3, daily=True),  # 期初库存单号
 }
 
 

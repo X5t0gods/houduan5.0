@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends
 from app.api.v1.auth import router as auth_router
 from app.api.v1.category import router as category_router
 from app.api.v1.health import router as health_router
+from app.api.v1.inventory import router as inventory_router
 from app.api.v1.product import router as product_router
 from app.api.v1.sale import router as sale_router
 from app.api.v1.unit import router as unit_router
@@ -29,9 +30,10 @@ api_router.include_router(category_router)
 api_router.include_router(unit_router)
 # 阶段 4：销售与收银
 api_router.include_router(sale_router)
+# 阶段 5：库存管理
+api_router.include_router(inventory_router)
 
 # ---------- 后续阶段挂载（占位注释） ----------
-# api_router.include_router(inventory_router, prefix="/inventory", tags=["库存管理"])
 # api_router.include_router(member_router, prefix="/members", tags=["会员管理"])
 # api_router.include_router(promotion_router, prefix="/promotions", tags=["促销管理"])
 # api_router.include_router(report_router, prefix="/reports", tags=["统计报表"])
