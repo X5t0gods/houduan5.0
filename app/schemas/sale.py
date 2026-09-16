@@ -137,8 +137,10 @@ class TradeCreateRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     request_id: str = Field(min_length=1, max_length=64, description="幂等键（前端 UUID）")
-    pos_id: int = Field(description="收银台 ID")
-    session_id: int | None = Field(default=None, description="班次号 ID（可选）")
+    # ⚠️ pos_id 前端当前未传（views/pos/index.vue:217 的 submitTrade 漏了此字段），
+    # 后端兼容默认值 1（演示环境只有 1 个收银台）。前端修复后可去掉 default。
+    pos_id: int = Field(default=1, description="收银台 ID")
+    session_id: int | None = Field(default=None, description="班次号 ID（可选，缺省自动取当前 OPEN 班次）")
     member_id: int | None = Field(default=None, description="会员 ID（非会员为空）")
     items: list[CartItem] = Field(min_length=1, description="商品明细")
     payments: list[TradePaymentIn] = Field(min_length=1, description="支付明细（混合支付）")

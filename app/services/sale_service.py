@@ -116,6 +116,13 @@ def settle_trade(
     # ---- 校验（8 步） ----
     _validate_settle_params(session, params, store_id=store_id)
 
+    # ---- session_id 自动回落（前端未传时取当前 OPEN 班次） ----
+    session_id = params.session_id
+    if session_id is None:
+        current_session = repo.get_current_session(session, params.pos_id)
+        if current_session:
+            session_id = current_session.id
+
     # ---- T1 事务（9 步）----
     now = _now()
     seq = NoSeqService(session)
@@ -138,7 +145,7 @@ def settle_trade(
         request_id=params.request_id,
         store_id=store_id,
         pos_id=params.pos_id,
-        session_id=params.session_id,
+        session_id=session_id,
         cashier_id=cashier_id,
         member_id=params.member_id,
         total_qty=total_qty,
@@ -235,7 +242,7 @@ def settle_trade(
     _update_promo_stats(session, calc.promo_details)
 
     # 步骤 9：更新班次累计
-    if params.session_id:
+    if session_id:
         pay_method_amounts: dict[str, Decimal] = {}
         for pay in params.payments:
             pay_method_amounts[pay.pay_method] = (
@@ -243,7 +250,7 @@ def settle_trade(
             )
         repo.increment_session_sale(
             session,
-            params.session_id,
+            session_id,
             amount=calc.receivable,
             pay_method_amounts=pay_method_amounts,
         )

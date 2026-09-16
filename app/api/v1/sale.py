@@ -37,6 +37,7 @@ from app.schemas.sale import (
     HoldCreateRequest,
     HoldOut,
     SaleReturnCreateRequest,
+    SaleSessionOut,
     SessionCloseRequest,
     TradeCreateRequest,
     VoidTradeRequest,
@@ -370,7 +371,9 @@ def get_current_session(
         store_id=current_user.store_id or 1,
         cashier_id=current_user.user_id,
     )
-    return success(result)
+    # 走 Pydantic schema 确保 Decimal → float（前端 .toFixed() 需要 number）
+    out = SaleSessionOut(**result)
+    return success(out.model_dump(mode="json"))
 
 
 # ---------- 14. POST /sales/sessions/close ----------
@@ -389,4 +392,5 @@ def close_session(
     result = sale_service.close_session(
         db, params, operator_id=current_user.user_id,
     )
-    return success(result)
+    out = SaleSessionOut(**result)
+    return success(out.model_dump(mode="json"))
